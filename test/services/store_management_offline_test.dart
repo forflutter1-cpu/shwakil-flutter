@@ -450,6 +450,8 @@ void main() {
           'id': 'maintenance-order-1',
           'clientRef': 'maintenance-order-ref-1',
           'status': 'completed',
+          'assignedTo': {'id': 'technician-1', 'name': 'فني'},
+          'diagnosis': 'تم الإصلاح',
           'parts': <Map<String, dynamic>>[],
           'logs': <Map<String, dynamic>>[],
           'contacts': <Map<String, dynamic>>[],
@@ -524,6 +526,22 @@ void main() {
           orderId: 'order-zero',
           orderClientRef: 'order-zero-ref',
           data: const {'status': 'delivered'},
+        ),
+        throwsA(isA<StateError>()),
+      );
+      await expectLater(
+        service.queueMaintenance(
+          userId: userId,
+          action: 'update',
+          orderId: 'order-zero',
+          orderClientRef: 'order-zero-ref',
+          data: const {
+            'status': 'completed',
+            'assignedToUserId': 'technician-1',
+            'diagnosis': 'تشخيص',
+            'laborPrice': 10.0,
+            'discount': 11.0,
+          },
         ),
         throwsA(isA<StateError>()),
       );

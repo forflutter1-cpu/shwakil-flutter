@@ -147,6 +147,10 @@ class StoreManagementService {
     if (order.isEmpty) {
       throw StateError('طلب الصيانة غير موجود في البيانات المحلية.');
     }
+    if (['add_part', 'remove_part'].contains(action) &&
+        order['invoiceId'] != null) {
+      throw StateError('لا يمكن تعديل قطع الصيانة بعد إصدار الفاتورة.');
+    }
     if (action == 'finalize') {
       if (!['completed', 'delivered'].contains(order['status'])) {
         throw StateError('يجب إكمال الصيانة قبل إنشاء الفاتورة.');
@@ -156,6 +160,10 @@ class StoreManagementService {
       }
       if (order['invoiceId'] != null) {
         throw StateError('فاتورة الصيانة منشأة مسبقًا.');
+      }
+      if (((order['paidAmount'] as num?)?.toDouble() ?? 0) >
+          ((order['total'] as num?)?.toDouble() ?? 0)) {
+        throw StateError('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الصيانة.');
       }
     }
     if (action == 'update') {
@@ -172,6 +180,39 @@ class StoreManagementService {
       }
       if (to == 'delivered' && order['invoiceId'] == null) {
         throw StateError('يجب إنشاء فاتورة الصيانة قبل تسليم الجهاز.');
+      }
+      final assignedTo = data.containsKey('assignedToUserId')
+          ? data['assignedToUserId']?.toString()
+          : Map<String, dynamic>.from(
+              order['assignedTo'] as Map? ?? const {},
+            )['id']?.toString();
+      final diagnosis = data.containsKey('diagnosis')
+          ? data['diagnosis']?.toString().trim() ?? ''
+          : order['diagnosis']?.toString().trim() ?? '';
+      if (['completed', 'delivered'].contains(to)) {
+        if (assignedTo == null || assignedTo.isEmpty) {
+          throw StateError('يجب تحديد الفني المسؤول قبل إكمال الصيانة.');
+        }
+        if (diagnosis.isEmpty) {
+          throw StateError('يجب تسجيل التشخيص قبل إكمال الصيانة.');
+        }
+      }
+      final partsPrice = (order['partsPrice'] as num?)?.toDouble() ?? 0;
+      final labor = data.containsKey('laborPrice')
+          ? (data['laborPrice'] as num?)?.toDouble() ?? 0
+          : (order['laborPrice'] as num?)?.toDouble() ?? 0;
+      final discount = data.containsKey('discount')
+          ? (data['discount'] as num?)?.toDouble() ?? 0
+          : (order['discount'] as num?)?.toDouble() ?? 0;
+      final paid = data.containsKey('paidAmount')
+          ? (data['paidAmount'] as num?)?.toDouble() ?? 0
+          : (order['paidAmount'] as num?)?.toDouble() ?? 0;
+      final gross = partsPrice + labor;
+      if (discount < 0 || discount > gross) {
+        throw StateError('الخصم لا يمكن أن يتجاوز قيمة القطع وأجرة العمل.');
+      }
+      if (paid < 0 || paid > gross - discount) {
+        throw StateError('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الصيانة.');
       }
     }
   }
