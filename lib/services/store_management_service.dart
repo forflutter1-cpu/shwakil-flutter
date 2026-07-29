@@ -450,10 +450,39 @@ class StoreManagementService {
     required List<Map<String, dynamic>> items,
     String notes = '',
   }) async {
+    final snapshot = await getSnapshot(userId);
+    final warehouses = _list(snapshot['warehouses']);
+    final fromWarehouse = warehouses
+        .where((item) => item['id']?.toString() == fromWarehouseId)
+        .firstOrNull;
+    final toWarehouse = warehouses
+        .where((item) => item['id']?.toString() == toWarehouseId)
+        .firstOrNull;
+    final products = _list(snapshot['products']);
+    final preparedItems = items.map((raw) {
+      final item = Map<String, dynamic>.from(raw);
+      final product = products
+          .where(
+            (value) => value['id']?.toString() == item['productId']?.toString(),
+          )
+          .firstOrNull;
+      final unit = _list(product?['units'])
+          .where(
+            (value) =>
+                value['id']?.toString() == item['productUnitId']?.toString(),
+          )
+          .firstOrNull;
+      return {
+        ...item,
+        'productClientRef': item['productClientRef'] ?? product?['clientRef'],
+        'unitClientRef': item['unitClientRef'] ?? unit?['clientRef'],
+      };
+    }).toList();
     await _validateStoreStock(
       userId: userId,
       warehouseId: fromWarehouseId,
-      items: items,
+      warehouseClientRef: fromWarehouse?['clientRef']?.toString(),
+      items: preparedItems,
     );
     await _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
@@ -461,8 +490,10 @@ class StoreManagementService {
       'type': 'create',
       'clientRef': _uuid.v4(),
       'fromWarehouseId': fromWarehouseId,
+      'fromWarehouseClientRef': fromWarehouse?['clientRef'],
       'toWarehouseId': toWarehouseId,
-      'items': items,
+      'toWarehouseClientRef': toWarehouse?['clientRef'],
+      'items': preparedItems,
       'notes': notes.trim(),
       'occurredAt': DateTime.now().toIso8601String(),
     });

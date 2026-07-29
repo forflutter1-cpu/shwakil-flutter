@@ -336,6 +336,68 @@ void main() {
       expect(await service.getPendingOperations(userId), hasLength(1));
     },
   );
+
+  test('offline transfer keeps all local references', () async {
+    final service = StoreManagementService();
+    const userId = 'local-transfer-refs-user';
+    await service.queueWarehouse(userId: userId, name: 'الأول');
+    await service.queueWarehouse(userId: userId, name: 'الثاني');
+    await service.queueProduct(
+      userId: userId,
+      name: 'صنف محلي',
+      baseUnit: 'piece',
+      minimumStock: 0,
+      salePrice: 10,
+      units: const [
+        {'name': 'حبة', 'factorToBase': 1, 'isBase': true},
+      ],
+    );
+    final snapshot = await service.getSnapshot(userId);
+    final warehouses = (snapshot['warehouses'] as List).cast<Map>();
+    final product = (snapshot['products'] as List).first as Map;
+    final unit = (product['units'] as List).first as Map;
+    await service.queueInvoice(
+      userId: userId,
+      invoiceType: 'purchase',
+      warehouseId: warehouses.first['id'] as String,
+      warehouseClientRef: warehouses.first['clientRef'] as String,
+      paidAmount: 0,
+      paymentMethod: 'cash',
+      items: [
+        {
+          'productId': product['id'],
+          'productClientRef': product['clientRef'],
+          'productUnitId': unit['id'],
+          'unitClientRef': unit['clientRef'],
+          'quantity': 5.0,
+          'unitPrice': 2.0,
+        },
+      ],
+    );
+    await service.queueStockTransfer(
+      userId: userId,
+      fromWarehouseId: warehouses.first['id'] as String,
+      toWarehouseId: warehouses.last['id'] as String,
+      items: [
+        {
+          'productId': product['id'],
+          'productUnitId': unit['id'],
+          'quantity': 2.0,
+        },
+      ],
+    );
+    final transfer = (await service.getPendingOperations(userId)).last;
+    expect(transfer['fromWarehouseClientRef'], warehouses.first['clientRef']);
+    expect(transfer['toWarehouseClientRef'], warehouses.last['clientRef']);
+    expect(
+      (transfer['items'] as List).first['productClientRef'],
+      product['clientRef'],
+    );
+    expect(
+      (transfer['items'] as List).first['unitClientRef'],
+      unit['clientRef'],
+    );
+  });
 }
 
 class _PartialSyncApi extends ApiService {
