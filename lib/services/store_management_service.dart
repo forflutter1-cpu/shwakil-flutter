@@ -766,6 +766,14 @@ class StoreManagementService {
     final prefs = await SharedPreferences.getInstance();
     final key = '$_queueKeyPrefix$userId';
     final queue = await _decodeList(prefs.getString(key));
+    operation['createdAt'] ??= DateTime.now().toIso8601String();
+    operation['queueSequence'] ??=
+        queue.fold<int>(
+          0,
+          (highest, item) =>
+              max(highest, (item['queueSequence'] as num?)?.toInt() ?? 0),
+        ) +
+        1;
     queue.add(operation);
     await _storePendingOperations(userId, queue);
   }
@@ -810,6 +818,12 @@ class StoreManagementService {
   ) {
     final priority = _syncPriority(left).compareTo(_syncPriority(right));
     if (priority != 0) return priority;
+    final leftSequence = (left['queueSequence'] as num?)?.toInt();
+    final rightSequence = (right['queueSequence'] as num?)?.toInt();
+    if (leftSequence != null && rightSequence != null) {
+      final sequence = leftSequence.compareTo(rightSequence);
+      if (sequence != 0) return sequence;
+    }
     return _operationCreatedAt(left).compareTo(_operationCreatedAt(right));
   }
 

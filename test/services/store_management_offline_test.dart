@@ -637,6 +637,25 @@ void main() {
     );
     expect(await service.getPendingOperations(userId), isEmpty);
   });
+
+  test('offline queue keeps a durable insertion sequence', () async {
+    final service = StoreManagementService();
+    const userId = 'queue-sequence-user';
+    await Future.wait([
+      service.queueParty(userId: userId, type: 'customer', name: 'الأول'),
+      service.queueParty(userId: userId, type: 'customer', name: 'الثاني'),
+    ]);
+    final pending = await service.getPendingOperations(userId);
+    expect(pending.map((item) => item['queueSequence']), [1, 2]);
+    expect(pending.map((item) => item['name']), ['الأول', 'الثاني']);
+    expect(
+      pending.every(
+        (item) =>
+            DateTime.tryParse(item['createdAt']?.toString() ?? '') != null,
+      ),
+      isTrue,
+    );
+  });
 }
 
 class _PartialSyncApi extends ApiService {
