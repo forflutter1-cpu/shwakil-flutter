@@ -251,6 +251,46 @@ void main() {
       expect(await service.getPendingOperations(userId), hasLength(1));
     },
   );
+
+  test('deleting a pending sale restores confirmed balances', () async {
+    final service = StoreManagementService();
+    const userId = 'delete-pending-user';
+    await service.queueProduct(
+      userId: userId,
+      name: 'تهيئة',
+      baseUnit: 'piece',
+      minimumStock: 0,
+      salePrice: 1,
+      units: const [],
+    );
+    await service.syncPending(userId: userId, api: _StockSnapshotApi());
+    await service.queueInvoice(
+      userId: userId,
+      invoiceType: 'sale',
+      warehouseId: 'warehouse-1',
+      paidAmount: 0,
+      paymentMethod: 'cash',
+      items: const [
+        {
+          'productId': 'product-1',
+          'productUnitId': 'unit-1',
+          'quantity': 3.0,
+          'unitPrice': 10.0,
+        },
+      ],
+    );
+    var snapshot = await service.getSnapshot(userId);
+    expect((snapshot['products'] as List).first['stockQuantity'], 2.0);
+    expect(snapshot['invoices'], hasLength(1));
+    final operation = (await service.getPendingOperations(userId)).single;
+    await service.removePendingOperation(
+      userId: userId,
+      opId: operation['opId'] as String,
+    );
+    snapshot = await service.getSnapshot(userId);
+    expect((snapshot['products'] as List).first['stockQuantity'], 5.0);
+    expect(snapshot['invoices'], isEmpty);
+  });
 }
 
 class _PartialSyncApi extends ApiService {
@@ -277,4 +317,45 @@ class _PartialSyncApi extends ApiService {
       'syncedAt': DateTime.now().toIso8601String(),
     };
   }
+}
+
+class _StockSnapshotApi extends ApiService {
+  @override
+  Future<Map<String, dynamic>> syncStoreManagement(
+    List<Map<String, dynamic>> operations,
+  ) async => {
+    'workspace': {'id': 'server-workspace', 'name': 'المحل', 'currency': 'ILS'},
+    'products': [
+      {
+        'id': 'product-1',
+        'clientRef': 'product-ref-1',
+        'name': 'قطعة',
+        'baseUnit': 'piece',
+        'stockQuantity': 5.0,
+        'averagePurchaseCost': 4.0,
+        'minimumStock': 0.0,
+        'units': [
+          {
+            'id': 'unit-1',
+            'clientRef': 'unit-ref-1',
+            'name': 'حبة',
+            'factorToBase': 1.0,
+            'salePrice': 10.0,
+          },
+        ],
+        'warehouseStocks': [
+          {'warehouseId': 'warehouse-1', 'quantity': 5.0},
+        ],
+      },
+    ],
+    'warehouses': [
+      {'id': 'warehouse-1', 'name': 'الرئيسي', 'isDefault': true},
+    ],
+    'parties': <Map<String, dynamic>>[],
+    'invoices': <Map<String, dynamic>>[],
+    'payments': <Map<String, dynamic>>[],
+    'debtBookAccounts': <Map<String, dynamic>>[],
+    'summary': <String, dynamic>{},
+    'syncedAt': DateTime.now().toIso8601String(),
+  };
 }

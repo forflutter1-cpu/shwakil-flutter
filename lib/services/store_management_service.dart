@@ -11,6 +11,8 @@ import 'api_service.dart';
 
 class StoreManagementService {
   static const _snapshotKeyPrefix = 'store_management_snapshot_';
+  static const _confirmedSnapshotKeyPrefix =
+      'store_management_confirmed_snapshot_';
   static const _queueKeyPrefix = 'store_management_queue_';
   static const _offlineKeyName = 'store_management_aes_key_v1';
   static final AesGcm _cipher = AesGcm.with256bits();
@@ -42,14 +44,16 @@ class StoreManagementService {
         .toList();
     if (next.isEmpty) {
       await prefs.remove(key);
-      return;
+    } else {
+      await prefs.setString(key, await _encode(next));
     }
-    await prefs.setString(key, await _encode(next));
+    await _restoreConfirmedWithPending(userId, next);
   }
 
   Future<void> clearPendingOperations(String userId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('$_queueKeyPrefix$userId');
+    await _restoreConfirmedWithPending(userId, const []);
   }
 
   Future<Map<String, dynamic>> refresh({
@@ -57,8 +61,12 @@ class StoreManagementService {
     required ApiService api,
   }) async {
     final snapshot = await api.getStoreManagementSnapshot();
-    await _storeSnapshot(userId, snapshot);
-    return snapshot;
+    final confirmed = await _preserveConfirmedMaintenance(userId, snapshot);
+    await _storeConfirmedSnapshot(userId, confirmed);
+    final pending = await getPendingOperations(userId);
+    final composed = _replayPendingOperations(confirmed, pending);
+    await _storeSnapshot(userId, composed);
+    return composed;
   }
 
   Future<Map<String, dynamic>> getMaintenanceSnapshot(String userId) async =>
@@ -72,6 +80,8 @@ class StoreManagementService {
   ) async {
     final snapshot = await getSnapshot(userId);
     await _storeSnapshot(userId, {...snapshot, 'maintenance': data});
+    final confirmed = await _getConfirmedSnapshot(userId);
+    await _storeConfirmedSnapshot(userId, {...confirmed, 'maintenance': data});
   }
 
   Future<void> queueMaintenance({
@@ -184,6 +194,11 @@ class StoreManagementService {
           final maintenance = await api.getMaintenanceSnapshot();
           rebaseSource = {...snapshot, 'maintenance': maintenance};
         }
+        rebaseSource = await _preserveConfirmedMaintenance(
+          userId,
+          rebaseSource,
+        );
+        await _storeConfirmedSnapshot(userId, rebaseSource);
         await _storeSnapshot(
           userId,
           _replayPendingOperations(rebaseSource, remaining),
@@ -229,6 +244,44 @@ class StoreManagementService {
       rebased = _applyLocalOperation(rebased, operation);
     }
     return rebased;
+  }
+
+  Future<Map<String, dynamic>> _getConfirmedSnapshot(String userId) async {
+    final prefs = await SharedPreferences.getInstance();
+    return _decodeObject(
+      prefs.getString('$_confirmedSnapshotKeyPrefix$userId'),
+    );
+  }
+
+  Future<void> _storeConfirmedSnapshot(
+    String userId,
+    Map<String, dynamic> snapshot,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      '$_confirmedSnapshotKeyPrefix$userId',
+      await _encode(snapshot),
+    );
+  }
+
+  Future<Map<String, dynamic>> _preserveConfirmedMaintenance(
+    String userId,
+    Map<String, dynamic> serverSnapshot,
+  ) async {
+    final confirmed = await _getConfirmedSnapshot(userId);
+    return confirmed['maintenance'] is Map &&
+            serverSnapshot['maintenance'] == null
+        ? {...serverSnapshot, 'maintenance': confirmed['maintenance']}
+        : serverSnapshot;
+  }
+
+  Future<void> _restoreConfirmedWithPending(
+    String userId,
+    List<Map<String, dynamic>> pending,
+  ) async {
+    final confirmed = await _getConfirmedSnapshot(userId);
+    if (confirmed.isEmpty) return;
+    await _storeSnapshot(userId, _replayPendingOperations(confirmed, pending));
   }
 
   Future<void> queueProduct({

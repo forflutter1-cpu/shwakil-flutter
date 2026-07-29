@@ -161,8 +161,12 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
   Future<void> _reloadLocalPending() async {
     if (_userId.isEmpty) return;
     final pending = await _store.getPendingOperations(_userId);
+    final snapshot = await _store.getSnapshot(_userId);
     if (!mounted) return;
-    setState(() => _pending = pending);
+    setState(() {
+      _pending = pending;
+      _snapshot = snapshot;
+    });
   }
 
   Future<void> _deletePendingOperation(Map<String, dynamic> operation) async {
