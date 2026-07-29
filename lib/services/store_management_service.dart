@@ -614,6 +614,10 @@ class StoreManagementService {
     }
     if (entity == 'transfer') return 7;
     if (entity == 'maintenance') {
+      if (operation['action'] == 'update' &&
+          operation['status'] == 'delivered') {
+        return 11;
+      }
       return operation['action'] == 'finalize' ? 10 : 8;
     }
     if (entity == 'payment') return 9;

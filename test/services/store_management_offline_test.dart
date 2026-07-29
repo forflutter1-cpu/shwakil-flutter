@@ -439,6 +439,52 @@ void main() {
       unit['clientRef'],
     );
   });
+
+  test('maintenance invoice syncs before delivered status', () async {
+    final service = StoreManagementService();
+    final api = _MaintenanceOrderApi();
+    const userId = 'maintenance-delivery-order-user';
+    await service.cacheMaintenanceSnapshot(userId, {
+      'orders': [
+        {
+          'id': 'maintenance-order-1',
+          'clientRef': 'maintenance-order-ref-1',
+          'status': 'completed',
+          'parts': <Map<String, dynamic>>[],
+          'logs': <Map<String, dynamic>>[],
+          'contacts': <Map<String, dynamic>>[],
+          'laborPrice': 20.0,
+          'partsPrice': 0.0,
+          'partsCost': 0.0,
+          'otherCost': 0.0,
+          'discount': 0.0,
+          'paidAmount': 20.0,
+          'total': 20.0,
+          'profit': 20.0,
+          'createdAt': DateTime.now().toIso8601String(),
+        },
+      ],
+      'products': <Map<String, dynamic>>[],
+      'warehouses': <Map<String, dynamic>>[],
+      'employees': <Map<String, dynamic>>[],
+      'permissions': <String, dynamic>{},
+    });
+    await service.queueMaintenance(
+      userId: userId,
+      action: 'finalize',
+      orderId: 'maintenance-order-1',
+      orderClientRef: 'maintenance-order-ref-1',
+    );
+    await service.queueMaintenance(
+      userId: userId,
+      action: 'update',
+      orderId: 'maintenance-order-1',
+      orderClientRef: 'maintenance-order-ref-1',
+      data: const {'status': 'delivered'},
+    );
+    await service.syncPending(userId: userId, api: api);
+    expect(api.actions, ['finalize', 'update']);
+  });
 }
 
 class _PartialSyncApi extends ApiService {
@@ -505,5 +551,54 @@ class _StockSnapshotApi extends ApiService {
     'debtBookAccounts': <Map<String, dynamic>>[],
     'summary': <String, dynamic>{},
     'syncedAt': DateTime.now().toIso8601String(),
+  };
+}
+
+class _MaintenanceOrderApi extends ApiService {
+  final actions = <String>[];
+
+  @override
+  Future<Map<String, dynamic>> syncStoreManagement(
+    List<Map<String, dynamic>> operations,
+  ) async {
+    actions.add(operations.single['action'] as String);
+    return {
+      'workspace': {
+        'id': 'server-workspace',
+        'name': 'المحل',
+        'currency': 'ILS',
+      },
+      'products': <Map<String, dynamic>>[],
+      'warehouses': <Map<String, dynamic>>[],
+      'parties': <Map<String, dynamic>>[],
+      'invoices': <Map<String, dynamic>>[],
+      'payments': <Map<String, dynamic>>[],
+      'debtBookAccounts': <Map<String, dynamic>>[],
+      'summary': <String, dynamic>{},
+      'syncedAt': DateTime.now().toIso8601String(),
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> getMaintenanceSnapshot({
+    String search = '',
+    String status = '',
+  }) async => {
+    'orders': [
+      {
+        'id': 'maintenance-order-1',
+        'clientRef': 'maintenance-order-ref-1',
+        'status': 'completed',
+        'invoiceId': 'invoice-1',
+        'parts': <Map<String, dynamic>>[],
+        'logs': <Map<String, dynamic>>[],
+        'contacts': <Map<String, dynamic>>[],
+        'createdAt': DateTime.now().toIso8601String(),
+      },
+    ],
+    'products': <Map<String, dynamic>>[],
+    'warehouses': <Map<String, dynamic>>[],
+    'employees': <Map<String, dynamic>>[],
+    'permissions': <String, dynamic>{},
   };
 }
