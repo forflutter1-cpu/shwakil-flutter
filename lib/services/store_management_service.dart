@@ -60,6 +60,45 @@ class StoreManagementService {
     return snapshot;
   }
 
+  Future<Map<String, dynamic>> getMaintenanceSnapshot(String userId) async =>
+      Map<String, dynamic>.from(
+        (await getSnapshot(userId))['maintenance'] as Map? ?? const {},
+      );
+
+  Future<void> cacheMaintenanceSnapshot(
+    String userId,
+    Map<String, dynamic> data,
+  ) async {
+    final snapshot = await getSnapshot(userId);
+    await _storeSnapshot(userId, {...snapshot, 'maintenance': data});
+  }
+
+  Future<void> queueMaintenance({
+    required String userId,
+    required String action,
+    String? orderId,
+    String? orderClientRef,
+    String? partId,
+    String? partClientRef,
+    Map<String, dynamic> data = const {},
+  }) {
+    final clientRef = data['clientRef']?.toString().trim().isNotEmpty == true
+        ? data['clientRef'].toString()
+        : _uuid.v4();
+    return _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'maintenance',
+      'action': action,
+      'clientRef': clientRef,
+      'orderId': ?orderId,
+      'orderClientRef': ?orderClientRef,
+      'partId': ?partId,
+      'partClientRef': ?partClientRef,
+      'createdAt': DateTime.now().toIso8601String(),
+      ...data,
+    });
+  }
+
   Future<Map<String, dynamic>> syncPending({
     required String userId,
     required ApiService api,
@@ -308,10 +347,15 @@ class StoreManagementService {
     Map<String, dynamic> snapshot,
   ) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      '$_snapshotKeyPrefix$userId',
-      await _encode(snapshot),
+    final current = await _decodeObject(
+      prefs.getString('$_snapshotKeyPrefix$userId'),
     );
+    final preservedMaintenance = current['maintenance'];
+    final stored =
+        preservedMaintenance != null && snapshot['maintenance'] == null
+        ? {...snapshot, 'maintenance': preservedMaintenance}
+        : snapshot;
+    await prefs.setString('$_snapshotKeyPrefix$userId', await _encode(stored));
   }
 
   Future<void> _enqueue(String userId, Map<String, dynamic> operation) async {
@@ -371,11 +415,15 @@ class StoreManagementService {
     if (entity == 'product') return 1;
     if (entity == 'warehouse') return 2;
     if (entity == 'party') return 3;
+    if (entity == 'maintenance' && operation['action'] == 'create') return 4;
     if (entity == 'invoice') {
-      return operation['invoiceType']?.toString() == 'purchase' ? 4 : 5;
+      return operation['invoiceType']?.toString() == 'purchase' ? 5 : 6;
     }
-    if (entity == 'transfer') return 6;
-    if (entity == 'payment') return 7;
+    if (entity == 'transfer') return 7;
+    if (entity == 'maintenance') {
+      return operation['action'] == 'finalize' ? 10 : 8;
+    }
+    if (entity == 'payment') return 9;
     return 9;
   }
 
@@ -444,11 +492,182 @@ class StoreManagementService {
       case 'payment':
         _applyLocalPayment(next, operation);
         break;
+      case 'maintenance':
+        _applyLocalMaintenance(next, operation);
+        break;
     }
 
     next['summary'] = _summaryFor(next);
     next['syncedAt'] = snapshot['syncedAt'];
     return next;
+  }
+
+  void _applyLocalMaintenance(
+    Map<String, dynamic> snapshot,
+    Map<String, dynamic> op,
+  ) {
+    final maintenance = Map<String, dynamic>.from(
+      snapshot['maintenance'] as Map? ?? const {},
+    );
+    final orders = _list(maintenance['orders']);
+    final action = op['action']?.toString();
+    if (action == 'create') {
+      final ref = op['clientRef'].toString();
+      orders.insert(0, {
+        ...op,
+        'id': 'local:$ref',
+        'clientRef': ref,
+        'orderNumber': 'محلي-${ref.substring(0, 6)}',
+        'status': 'received',
+        'priority': op['priority'] ?? 'normal',
+        'parts': [],
+        'logs': [],
+        'contacts': [],
+        'partsPrice': 0.0,
+        'partsCost': 0.0,
+        'laborPrice': 0.0,
+        'otherCost': 0.0,
+        'discount': 0.0,
+        'total': 0.0,
+        'paidAmount': 0.0,
+        'profit': 0.0,
+        'createdAt': op['createdAt'],
+        'pendingSync': true,
+      });
+    } else {
+      final index = orders.indexWhere(
+        (o) => _matchesRef(
+          o,
+          id: op['orderId']?.toString(),
+          clientRef: op['orderClientRef']?.toString(),
+        ),
+      );
+      if (index >= 0) {
+        final order = Map<String, dynamic>.from(orders[index]);
+        if (action == 'update') {
+          order.addAll(op);
+          order['pendingSync'] = true;
+        } else if (action == 'add_part') {
+          final parts = _list(order['parts']);
+          final product = _list(maintenance['products'])
+              .where((p) => p['id']?.toString() == op['productId']?.toString())
+              .firstOrNull;
+          final quantity = (op['quantity'] as num?)?.toDouble() ?? 0;
+          final price = (op['unitPrice'] as num?)?.toDouble() ?? 0;
+          parts.add({
+            'id': 'local:${op['clientRef']}',
+            'clientRef': op['clientRef'],
+            'productName': product?['name'] ?? '',
+            'productId': op['productId'],
+            'warehouseId': op['warehouseId'],
+            'quantity': quantity,
+            'baseQuantity': quantity,
+            'unitName': '',
+            'priceTotal': quantity * price,
+            'pendingSync': true,
+          });
+          order['parts'] = parts;
+          order['partsPrice'] = parts.fold<double>(
+            0,
+            (s, p) => s + ((p['priceTotal'] as num?)?.toDouble() ?? 0),
+          );
+          order['total'] =
+              ((order['partsPrice'] as num?)?.toDouble() ?? 0) +
+              ((order['laborPrice'] as num?)?.toDouble() ?? 0) -
+              ((order['discount'] as num?)?.toDouble() ?? 0);
+          _adjustMaintenanceStock(
+            maintenance,
+            snapshot,
+            op['productId']?.toString(),
+            op['warehouseId']?.toString(),
+            -quantity,
+          );
+        } else if (action == 'remove_part') {
+          final oldParts = _list(order['parts']);
+          final removed = oldParts
+              .where(
+                (p) => _matchesRef(
+                  p,
+                  id: op['partId']?.toString(),
+                  clientRef: op['partClientRef']?.toString(),
+                ),
+              )
+              .firstOrNull;
+          order['parts'] = oldParts
+              .where(
+                (p) => !_matchesRef(
+                  p,
+                  id: op['partId']?.toString(),
+                  clientRef: op['partClientRef']?.toString(),
+                ),
+              )
+              .toList();
+          if (removed != null) {
+            _adjustMaintenanceStock(
+              maintenance,
+              snapshot,
+              removed['productId']?.toString(),
+              removed['warehouseId']?.toString(),
+              (removed['baseQuantity'] as num?)?.toDouble() ?? 0,
+            );
+          }
+        } else if (action == 'contact') {
+          order['contacts'] = [
+            {
+              'id': 'local:${op['clientRef']}',
+              'method': op['method'] ?? 'call',
+              'result': op['result'] ?? 'attempted',
+              'note': op['note'] ?? '',
+              'createdAt': op['createdAt'],
+              'pendingSync': true,
+            },
+            ..._list(order['contacts']),
+          ];
+        } else if (action == 'finalize') {
+          order['invoiceId'] = 'local:${op['clientRef']}';
+          order['pendingSync'] = true;
+        }
+        orders[index] = order;
+      }
+    }
+    maintenance['orders'] = orders;
+    snapshot['maintenance'] = maintenance;
+  }
+
+  void _adjustMaintenanceStock(
+    Map<String, dynamic> maintenance,
+    Map<String, dynamic> store,
+    String? productId,
+    String? warehouseId,
+    double change,
+  ) {
+    for (final container in [maintenance, store]) {
+      final products = _list(container['products']);
+      final index = products.indexWhere(
+        (p) => p['id']?.toString() == productId,
+      );
+      if (index < 0) continue;
+      final product = Map<String, dynamic>.from(products[index]);
+      final stocks = _list(product['stocks']);
+      final stockIndex = stocks.indexWhere(
+        (s) => s['warehouseId']?.toString() == warehouseId,
+      );
+      if (stockIndex >= 0) {
+        stocks[stockIndex] = {
+          ...stocks[stockIndex],
+          'quantity':
+              ((stocks[stockIndex]['quantity'] as num?)?.toDouble() ?? 0) +
+              change,
+        };
+        product['stocks'] = stocks;
+      }
+      if (product['stockQuantity'] != null) {
+        product['stockQuantity'] =
+            ((product['stockQuantity'] as num?)?.toDouble() ?? 0) + change;
+      }
+      products[index] = product;
+      container['products'] = products;
+    }
   }
 
   void _applyLocalProduct(

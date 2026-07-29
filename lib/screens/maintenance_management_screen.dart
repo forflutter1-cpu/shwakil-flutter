@@ -23,12 +23,17 @@ class _MaintenanceManagementScreenState
     extends State<MaintenanceManagementScreen>
     with SingleTickerProviderStateMixin {
   final _api = ApiService();
+  final _offlineStore = StoreManagementService();
+  final _auth = AuthService();
   final _search = TextEditingController();
   late final TabController _tabs = TabController(length: 3, vsync: this);
   Map<String, dynamic> _data = const {};
   bool _loading = true;
   String? _error;
   String _status = '';
+  String? _userId;
+  int _pendingCount = 0;
+  bool _offline = false;
 
   List<Map<String, dynamic>> get _orders => _list(_data['orders']);
   List<Map<String, dynamic>> get _employees => _list(_data['employees']);
@@ -47,7 +52,7 @@ class _MaintenanceManagementScreenState
   @override
   void initState() {
     super.initState();
-    unawaited(_load());
+    unawaited(_bootstrap());
   }
 
   @override
@@ -55,6 +60,21 @@ class _MaintenanceManagementScreenState
     _tabs.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
+    final user = await _auth.currentUser();
+    _userId = user?['id']?.toString();
+    if (_userId != null) {
+      final cached = await _offlineStore.getMaintenanceSnapshot(_userId!);
+      if (cached.isNotEmpty && mounted) {
+        setState(() {
+          _data = cached;
+          _loading = false;
+        });
+      }
+    }
+    await _load();
   }
 
   Future<void> _load() async {
@@ -65,21 +85,45 @@ class _MaintenanceManagementScreenState
       });
     }
     try {
+      if (_userId != null) {
+        await _offlineStore.syncPending(userId: _userId!, api: _api);
+      }
       final data = await _api.getMaintenanceSnapshot(
         search: _search.text,
         status: _status,
       );
+      if (_userId != null) {
+        await _offlineStore.cacheMaintenanceSnapshot(_userId!, data);
+      }
+      final pending = _userId == null
+          ? const <Map<String, dynamic>>[]
+          : await _offlineStore.getPendingOperations(_userId!);
       if (mounted) {
         setState(() {
           _data = data;
           _loading = false;
+          _offline = false;
+          _pendingCount = pending
+              .where((e) => e['entity'] == 'maintenance')
+              .length;
         });
       }
     } catch (e) {
+      final cached = _userId == null
+          ? const <String, dynamic>{}
+          : await _offlineStore.getMaintenanceSnapshot(_userId!);
+      final pending = _userId == null
+          ? const <Map<String, dynamic>>[]
+          : await _offlineStore.getPendingOperations(_userId!);
       if (mounted) {
         setState(() {
           _loading = false;
-          _error = ErrorMessageService.sanitize(e);
+          if (cached.isNotEmpty) _data = cached;
+          _offline = true;
+          _pendingCount = pending
+              .where((item) => item['entity'] == 'maintenance')
+              .length;
+          _error = cached.isEmpty ? ErrorMessageService.sanitize(e) : null;
         });
       }
     }
@@ -95,6 +139,27 @@ class _MaintenanceManagementScreenState
     appBar: AppBar(
       title: Text(context.loc.text('إدارة الصيانة', 'Maintenance management')),
       actions: [
+        if (_offline || _pendingCount > 0)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Chip(
+              avatar: Icon(
+                _offline ? Icons.cloud_off_rounded : Icons.sync_rounded,
+                size: 17,
+              ),
+              label: Text(
+                _offline
+                    ? context.loc.text(
+                        'دون إنترنت • $_pendingCount معلّق',
+                        'Offline • $_pendingCount pending',
+                      )
+                    : context.loc.text(
+                        '$_pendingCount بانتظار المزامنة',
+                        '$_pendingCount pending',
+                      ),
+              ),
+            ),
+          ),
         if (_canViewReports)
           IconButton(
             tooltip: context.loc.text('تصدير CSV', 'Export CSV'),
@@ -625,20 +690,23 @@ class _MaintenanceManagementScreenState
       return;
     }
     await _act(
-      () => _api.createMaintenanceOrder({
-        'customerName': customer.text,
-        'customerPhone': phone.text,
-        'deviceType': device.text,
-        'brand': brand.text,
-        'model': model.text,
-        'serialNumber': serial.text,
-        'reportedIssue': issue.text,
-        'deviceCondition': condition.text,
-        'accessories': accessories.text,
-        'location': location.text,
-        'assignedToUserId': employeeId,
-        'estimatedCost': double.tryParse(estimate.text) ?? 0,
-      }),
+      () => _queueMaintenance(
+        'create',
+        data: {
+          'customerName': customer.text,
+          'customerPhone': phone.text,
+          'deviceType': device.text,
+          'brand': brand.text,
+          'model': model.text,
+          'serialNumber': serial.text,
+          'reportedIssue': issue.text,
+          'deviceCondition': condition.text,
+          'accessories': accessories.text,
+          'location': location.text,
+          'assignedToUserId': employeeId,
+          'estimatedCost': double.tryParse(estimate.text) ?? 0,
+        },
+      ),
     );
   }
 
@@ -1015,18 +1083,23 @@ class _MaintenanceManagementScreenState
     );
     if (ok == true) {
       await _act(
-        () => _api.updateMaintenanceOrder(order['id'].toString(), {
-          'status': status,
-          'assignedToUserId': employee,
-          'diagnosis': diagnosis.text,
-          'workNotes': notes.text,
-          'location': location.text,
-          if (_canCreateSales) 'laborPrice': double.tryParse(labor.text) ?? 0,
-          if (_canViewProfits) 'otherCost': double.tryParse(other.text) ?? 0,
-          if (_canCreateSales) 'discount': double.tryParse(discount.text) ?? 0,
-          if (_canCreateSales) 'paidAmount': double.tryParse(paid.text) ?? 0,
-          'note': logNote.text,
-        }),
+        () => _queueMaintenance(
+          'update',
+          order: order,
+          data: {
+            'status': status,
+            'assignedToUserId': employee,
+            'diagnosis': diagnosis.text,
+            'workNotes': notes.text,
+            'location': location.text,
+            if (_canCreateSales) 'laborPrice': double.tryParse(labor.text) ?? 0,
+            if (_canViewProfits) 'otherCost': double.tryParse(other.text) ?? 0,
+            if (_canCreateSales)
+              'discount': double.tryParse(discount.text) ?? 0,
+            if (_canCreateSales) 'paidAmount': double.tryParse(paid.text) ?? 0,
+            'note': logNote.text,
+          },
+        ),
       );
     }
   }
@@ -1132,18 +1205,22 @@ class _MaintenanceManagementScreenState
     );
     if (ok == true && productId != null && warehouseId != null) {
       await _act(
-        () => _api.addMaintenancePart(order['id'].toString(), {
-          'productId': productId,
-          'warehouseId': warehouseId,
-          'quantity': double.tryParse(quantity.text) ?? 0,
-          'unitPrice': double.tryParse(price.text) ?? 0,
-        }),
+        () => _queueMaintenance(
+          'add_part',
+          order: order,
+          data: {
+            'productId': productId,
+            'warehouseId': warehouseId,
+            'quantity': double.tryParse(quantity.text) ?? 0,
+            'unitPrice': double.tryParse(price.text) ?? 0,
+          },
+        ),
       );
     }
   }
 
   Future<void> _finalize(Map<String, dynamic> order) async {
-    await _act(() => _api.finalizeMaintenanceOrder(order['id'].toString()));
+    await _act(() => _queueMaintenance('finalize', order: order));
   }
 
   Future<void> _removePart(
@@ -1176,10 +1253,7 @@ class _MaintenanceManagementScreenState
     );
     if (confirmed == true) {
       await _act(
-        () => _api.removeMaintenancePart(
-          order['id'].toString(),
-          part['id'].toString(),
-        ),
+        () => _queueMaintenance('remove_part', order: order, part: part),
       );
     }
   }
@@ -1207,11 +1281,79 @@ class _MaintenanceManagementScreenState
     }
   }
 
+  Future<Map<String, dynamic>> _queueMaintenance(
+    String action, {
+    Map<String, dynamic>? order,
+    Map<String, dynamic>? part,
+    Map<String, dynamic> data = const {},
+  }) async {
+    if (_userId == null) throw StateError('لا توجد جلسة محلية صالحة.');
+    final savedMessage = context.loc.text(
+      'تم الحفظ محليًا وستتم المزامنة تلقائيًا.',
+      'Saved offline and will sync automatically.',
+    );
+    final orderId = order?['id']?.toString();
+    final orderClientRef =
+        order?['clientRef']?.toString() ??
+        (orderId?.startsWith('local:') == true ? orderId!.substring(6) : null);
+    final partId = part?['id']?.toString();
+    final partClientRef =
+        part?['clientRef']?.toString() ??
+        (partId?.startsWith('local:') == true ? partId!.substring(6) : null);
+    final preparedData = Map<String, dynamic>.from(data);
+    if (action == 'add_part') {
+      final productId = data['productId']?.toString();
+      final warehouseId = data['warehouseId']?.toString();
+      final product = _products
+          .where((item) => item['id']?.toString() == productId)
+          .firstOrNull;
+      final warehouse = _warehouses
+          .where((item) => item['id']?.toString() == warehouseId)
+          .firstOrNull;
+      preparedData['productClientRef'] =
+          product?['clientRef'] ??
+          (productId?.startsWith('local:') == true
+              ? productId!.substring(6)
+              : null);
+      preparedData['warehouseClientRef'] =
+          warehouse?['clientRef'] ??
+          (warehouseId?.startsWith('local:') == true
+              ? warehouseId!.substring(6)
+              : null);
+    }
+    await _offlineStore.queueMaintenance(
+      userId: _userId!,
+      action: action,
+      orderId: orderId,
+      orderClientRef: orderClientRef,
+      partId: partId,
+      partClientRef: partClientRef,
+      data: preparedData,
+    );
+    final cached = await _offlineStore.getMaintenanceSnapshot(_userId!);
+    if (mounted) {
+      setState(() {
+        _data = cached;
+        _pendingCount++;
+      });
+    }
+    return {'message': savedMessage};
+  }
+
   Future<void> _call(String phone, String orderId) async {
     if (phone.trim().isNotEmpty) {
       if (orderId.isNotEmpty) {
         try {
-          await _api.recordMaintenanceContact(orderId);
+          final order = _orders
+              .where((item) => item['id']?.toString() == orderId)
+              .firstOrNull;
+          if (order != null) {
+            await _queueMaintenance(
+              'contact',
+              order: order,
+              data: const {'method': 'call', 'result': 'attempted'},
+            );
+          }
         } catch (_) {}
       }
       await launchUrl(Uri(scheme: 'tel', path: phone.trim()));

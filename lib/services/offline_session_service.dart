@@ -25,6 +25,7 @@ class OfflineSessionService {
     '/debt-book',
     '/store-management',
     '/inventory',
+    '/maintenance-management',
     '/affiliate-center',
     '/login-offline',
     '/unlock',
