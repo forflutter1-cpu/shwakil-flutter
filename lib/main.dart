@@ -804,20 +804,34 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
             final activeRouteName = routeName == '/app-shell'
                 ? '/home'
                 : routeName;
+            // Navigator/Overlay can retain a full-viewport hit-test region
+            // even when visually constrained inside a Row. Put the desktop
+            // sidebar above it in a Stack, and reserve its width for content,
+            // so pointer events always reach the navigation items.
             return ColoredBox(
               color: AppTheme.background,
-              child: Row(
-                textDirection: Directionality.of(context),
+              child: Stack(
                 children: [
-                  SizedBox(
-                    width: _sidebarWidth,
-                    child: AppSidebar(
-                      embedded: true,
-                      currentRouteName: activeRouteName,
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsetsDirectional.only(
+                        end: _sidebarWidth + 1,
+                      ),
+                      child: child,
                     ),
                   ),
-                  const VerticalDivider(width: 1, color: AppTheme.border),
-                  Expanded(child: child),
+                  PositionedDirectional(
+                    top: 0,
+                    bottom: 0,
+                    end: 0,
+                    child: SizedBox(
+                      width: _sidebarWidth,
+                      child: AppSidebar(
+                        embedded: true,
+                        currentRouteName: activeRouteName,
+                      ),
+                    ),
+                  ),
                 ],
               ),
             );
