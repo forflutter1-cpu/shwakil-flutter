@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
@@ -81,11 +82,14 @@ class StoreManagementService {
     String? partId,
     String? partClientRef,
     Map<String, dynamic> data = const {},
-  }) {
+  }) async {
     final clientRef = data['clientRef']?.toString().trim().isNotEmpty == true
         ? data['clientRef'].toString()
         : _uuid.v4();
-    return _enqueueAndApply(userId, {
+    if (action == 'add_part') {
+      await _validateMaintenanceStock(userId, data);
+    }
+    await _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'maintenance',
       'action': action,
@@ -97,6 +101,49 @@ class StoreManagementService {
       'createdAt': DateTime.now().toIso8601String(),
       ...data,
     });
+  }
+
+  Future<void> _validateMaintenanceStock(
+    String userId,
+    Map<String, dynamic> data,
+  ) async {
+    final maintenance = await getMaintenanceSnapshot(userId);
+    final productId = data['productId']?.toString();
+    final productClientRef = data['productClientRef']?.toString();
+    final warehouseId = data['warehouseId']?.toString();
+    final product = _list(maintenance['products']).firstWhere(
+      (item) =>
+          item['id']?.toString() == productId ||
+          (productClientRef != null &&
+              item['clientRef']?.toString() == productClientRef),
+      orElse: () => const {},
+    );
+    if (product.isEmpty) {
+      throw StateError('تعذر العثور على قطعة الصيانة محليًا.');
+    }
+    final unitId = data['productUnitId']?.toString();
+    final units = _list(product['units']);
+    final unit = units.firstWhere(
+      (item) => item['id']?.toString() == unitId,
+      orElse: () => units.isNotEmpty ? units.first : const {},
+    );
+    final factor =
+        (unit['factor'] as num?)?.toDouble() ??
+        (unit['factorToBase'] as num?)?.toDouble() ??
+        1;
+    final requested = ((data['quantity'] as num?)?.toDouble() ?? 0) * factor;
+    final stock = _list(product['stocks'])
+        .where((item) => item['warehouseId']?.toString() == warehouseId)
+        .firstOrNull;
+    final available = (stock?['quantity'] as num?)?.toDouble() ?? 0;
+    if (requested <= 0) {
+      throw StateError('يجب أن تكون كمية قطعة الصيانة أكبر من صفر.');
+    }
+    if (requested > available + 0.000001) {
+      throw StateError(
+        'الكمية المطلوبة من ${product['name'] ?? 'القطعة'} غير متوفرة في المخزن المحدد.',
+      );
+    }
   }
 
   Future<Map<String, dynamic>> syncPending({
@@ -259,8 +306,16 @@ class StoreManagementService {
     double discount = 0,
     String notes = '',
     bool quickSale = false,
-  }) {
-    return _enqueueAndApply(userId, {
+  }) async {
+    if (invoiceType == 'sale') {
+      await _validateStoreStock(
+        userId: userId,
+        warehouseId: warehouseId,
+        warehouseClientRef: warehouseClientRef,
+        items: items,
+      );
+    }
+    await _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'invoice',
       'type': 'create',
@@ -302,17 +357,24 @@ class StoreManagementService {
     required String toWarehouseId,
     required List<Map<String, dynamic>> items,
     String notes = '',
-  }) => _enqueueAndApply(userId, {
-    'opId': _uuid.v4(),
-    'entity': 'transfer',
-    'type': 'create',
-    'clientRef': _uuid.v4(),
-    'fromWarehouseId': fromWarehouseId,
-    'toWarehouseId': toWarehouseId,
-    'items': items,
-    'notes': notes.trim(),
-    'occurredAt': DateTime.now().toIso8601String(),
-  });
+  }) async {
+    await _validateStoreStock(
+      userId: userId,
+      warehouseId: fromWarehouseId,
+      items: items,
+    );
+    await _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'transfer',
+      'type': 'create',
+      'clientRef': _uuid.v4(),
+      'fromWarehouseId': fromWarehouseId,
+      'toWarehouseId': toWarehouseId,
+      'items': items,
+      'notes': notes.trim(),
+      'occurredAt': DateTime.now().toIso8601String(),
+    });
+  }
 
   Future<void> queuePayment({
     required String userId,
@@ -446,10 +508,85 @@ class StoreManagementService {
     String userId,
     Map<String, dynamic> operation,
   ) async {
-    await _enqueue(userId, operation);
     final snapshot = await getSnapshot(userId);
     final next = _applyLocalOperation(snapshot, operation);
+    await _enqueue(userId, operation);
     await _storeSnapshot(userId, next);
+  }
+
+  Future<void> _validateStoreStock({
+    required String userId,
+    required List<Map<String, dynamic>> items,
+    String? warehouseId,
+    String? warehouseClientRef,
+  }) async {
+    final snapshot = await getSnapshot(userId);
+    final warehouses = _list(snapshot['warehouses']);
+    final resolvedWarehouse = warehouses.firstWhere(
+      (warehouse) =>
+          warehouse['id']?.toString() == warehouseId ||
+          (warehouseClientRef != null &&
+              warehouse['clientRef']?.toString() == warehouseClientRef),
+      orElse: () => warehouses.firstWhere(
+        (warehouse) => warehouse['isDefault'] == true,
+        orElse: () => warehouses.isNotEmpty ? warehouses.first : const {},
+      ),
+    );
+    final resolvedWarehouseId =
+        resolvedWarehouse['id']?.toString() ?? warehouseId;
+    final requested = <String, double>{};
+    final available = <String, double>{};
+    final names = <String, String>{};
+    for (final raw in items) {
+      final productId = raw['productId']?.toString();
+      final productClientRef = raw['productClientRef']?.toString();
+      final product = _list(snapshot['products']).firstWhere(
+        (item) =>
+            item['id']?.toString() == productId ||
+            (productClientRef != null &&
+                item['clientRef']?.toString() == productClientRef),
+        orElse: () => const {},
+      );
+      if (product.isEmpty) {
+        throw StateError('تعذر العثور على الصنف في البيانات المحلية.');
+      }
+      final unitId =
+          raw['productUnitId']?.toString() ?? raw['unitId']?.toString();
+      final unitClientRef = raw['unitClientRef']?.toString();
+      final units = _list(product['units']);
+      final unit = units.firstWhere(
+        (item) =>
+            item['id']?.toString() == unitId ||
+            (unitClientRef != null &&
+                item['clientRef']?.toString() == unitClientRef),
+        orElse: () => units.isNotEmpty ? units.first : const {},
+      );
+      final factor = (unit['factorToBase'] as num?)?.toDouble() ?? 1;
+      final baseQuantity =
+          ((raw['quantity'] as num?)?.toDouble() ?? 0) * factor;
+      final key = product['id']?.toString() ?? productClientRef ?? '';
+      requested[key] = (requested[key] ?? 0) + baseQuantity;
+      names[key] = product['name']?.toString() ?? 'الصنف';
+      final stocks = _list(product['warehouseStocks']);
+      available[key] =
+          (stocks
+                      .where(
+                        (stock) =>
+                            stock['warehouseId']?.toString() ==
+                            resolvedWarehouseId,
+                      )
+                      .firstOrNull?['quantity']
+                  as num?)
+              ?.toDouble() ??
+          0;
+    }
+    for (final entry in requested.entries) {
+      if (entry.value > (available[entry.key] ?? 0) + 0.000001) {
+        throw StateError(
+          'الكمية المطلوبة من ${names[entry.key]} غير متوفرة في المخزن المحدد.',
+        );
+      }
+    }
   }
 
   Map<String, dynamic> _applyLocalOperation(
@@ -1060,7 +1197,7 @@ class StoreManagementService {
           (invoiceClientRef != null &&
               item['clientRef']?.toString() == invoiceClientRef),
     );
-    final amount = _money(operation['amount'] ?? 0);
+    var amount = _money(operation['amount'] ?? 0);
     String? partyId = operation['partyId']?.toString();
     final partyClientRef = operation['partyClientRef']?.toString();
     String direction = operation['direction']?.toString() ?? 'in';
@@ -1070,6 +1207,7 @@ class StoreManagementService {
       direction = invoice['type'] == 'purchase' ? 'out' : 'in';
       final total = (invoice['total'] as num?)?.toDouble() ?? 0;
       final oldPaid = (invoice['paidAmount'] as num?)?.toDouble() ?? 0;
+      amount = min(amount, max(0, total - oldPaid));
       final paid = _money((oldPaid + amount).clamp(0, total));
       final due = _money(total - paid);
       invoice['paidAmount'] = paid;
