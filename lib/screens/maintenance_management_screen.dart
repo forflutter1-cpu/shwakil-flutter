@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:file_saver/file_saver.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -93,6 +95,12 @@ class _MaintenanceManagementScreenState
     appBar: AppBar(
       title: Text(context.loc.text('إدارة الصيانة', 'Maintenance management')),
       actions: [
+        if (_canViewReports)
+          IconButton(
+            tooltip: context.loc.text('تصدير CSV', 'Export CSV'),
+            onPressed: _orders.isEmpty ? null : _exportCsv,
+            icon: const Icon(Icons.download_rounded),
+          ),
         IconButton(
           tooltip: context.loc.text('تحديث', 'Refresh'),
           onPressed: _load,
@@ -463,6 +471,7 @@ class _MaintenanceManagementScreenState
   );
 
   Future<void> _newOrder() async {
+    final formKey = GlobalKey<FormState>();
     final customer = TextEditingController(),
         phone = TextEditingController(),
         device = TextEditingController(),
@@ -485,90 +494,113 @@ class _MaintenanceManagementScreenState
           content: SizedBox(
             width: 620,
             child: SingleChildScrollView(
-              child: Column(
-                children: [
-                  _field(
-                    customer,
-                    context.loc.text('اسم العميل *', 'Customer name *'),
-                  ),
-                  _field(
-                    phone,
-                    context.loc.text('رقم الهاتف', 'Phone'),
-                    type: TextInputType.phone,
-                  ),
-                  _field(
-                    device,
-                    context.loc.text('نوع الجهاز *', 'Device type *'),
-                  ),
-                  if (_canCreateSales)
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _field(
-                            brand,
-                            context.loc.text('الماركة', 'Brand'),
-                          ),
+              child: Form(
+                key: formKey,
+                child: Column(
+                  children: [
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Text(
+                        context.loc.text(
+                          'الحقول المميزة بنجمة (*) إلزامية لضمان استلام واضح وقابل للمتابعة.',
+                          'Fields marked (*) are required for a clear, traceable receipt.',
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _field(
-                            model,
-                            context.loc.text('الموديل', 'Model'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  _field(
-                    serial,
-                    context.loc.text('الرقم التسلسلي', 'Serial number'),
-                  ),
-                  _field(
-                    issue,
-                    context.loc.text('العطل حسب العميل *', 'Reported issue *'),
-                    lines: 2,
-                  ),
-                  _field(
-                    condition,
-                    context.loc.text(
-                      'حالة الجهاز عند الاستلام',
-                      'Condition at receipt',
-                    ),
-                  ),
-                  _field(
-                    accessories,
-                    context.loc.text(
-                      'الملحقات المستلمة',
-                      'Received accessories',
-                    ),
-                  ),
-                  _field(
-                    location,
-                    context.loc.text('مكان الحفظ', 'Storage location'),
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: employeeId,
-                    decoration: InputDecoration(
-                      labelText: context.loc.text(
-                        'الفني المسؤول',
-                        'Assigned technician',
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
-                    items: _employees
-                        .map(
-                          (e) => DropdownMenuItem(
-                            value: e['id']?.toString(),
-                            child: Text(e['name']?.toString() ?? ''),
+                    const SizedBox(height: 12),
+                    _field(
+                      customer,
+                      context.loc.text('اسم العميل *', 'Customer name *'),
+                      required: true,
+                    ),
+                    _field(
+                      phone,
+                      context.loc.text('رقم الهاتف *', 'Phone *'),
+                      type: TextInputType.phone,
+                      required: true,
+                    ),
+                    _field(
+                      device,
+                      context.loc.text('نوع الجهاز *', 'Device type *'),
+                      required: true,
+                    ),
+                    if (_canCreateSales)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _field(
+                              brand,
+                              context.loc.text('الماركة', 'Brand'),
+                            ),
                           ),
-                        )
-                        .toList(),
-                    onChanged: (v) => setLocal(() => employeeId = v),
-                  ),
-                  _field(
-                    estimate,
-                    context.loc.text('التكلفة التقديرية', 'Estimated cost'),
-                    type: TextInputType.number,
-                  ),
-                ],
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _field(
+                              model,
+                              context.loc.text('الموديل', 'Model'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    _field(
+                      serial,
+                      context.loc.text('الرقم التسلسلي', 'Serial number'),
+                    ),
+                    _field(
+                      issue,
+                      context.loc.text(
+                        'العطل حسب العميل *',
+                        'Reported issue *',
+                      ),
+                      lines: 2,
+                      required: true,
+                    ),
+                    _field(
+                      condition,
+                      context.loc.text(
+                        'حالة الجهاز عند الاستلام *',
+                        'Condition at receipt *',
+                      ),
+                      required: true,
+                    ),
+                    _field(
+                      accessories,
+                      context.loc.text(
+                        'الملحقات المستلمة',
+                        'Received accessories',
+                      ),
+                    ),
+                    _field(
+                      location,
+                      context.loc.text('مكان الحفظ *', 'Storage location *'),
+                      required: true,
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: employeeId,
+                      decoration: InputDecoration(
+                        labelText: context.loc.text(
+                          'الفني المسؤول',
+                          'Assigned technician',
+                        ),
+                      ),
+                      items: _employees
+                          .map(
+                            (e) => DropdownMenuItem(
+                              value: e['id']?.toString(),
+                              child: Text(e['name']?.toString() ?? ''),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) => setLocal(() => employeeId = v),
+                    ),
+                    _field(
+                      estimate,
+                      context.loc.text('التكلفة التقديرية', 'Estimated cost'),
+                      type: TextInputType.number,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -578,17 +610,18 @@ class _MaintenanceManagementScreenState
               child: Text(context.loc.text('إلغاء', 'Cancel')),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(dialog, true),
+              onPressed: () {
+                if (formKey.currentState?.validate() == true) {
+                  Navigator.pop(dialog, true);
+                }
+              },
               child: Text(context.loc.text('حفظ الاستلام', 'Save receipt')),
             ),
           ],
         ),
       ),
     );
-    if (ok != true ||
-        customer.text.trim().isEmpty ||
-        device.text.trim().isEmpty ||
-        issue.text.trim().isEmpty) {
+    if (ok != true) {
       return;
     }
     await _act(
@@ -734,7 +767,9 @@ class _MaintenanceManagementScreenState
                     icon: const Icon(Icons.inventory_2),
                     label: Text(context.loc.text('سحب قطعة', 'Use part')),
                   ),
-                if (_canCreateSales && order['invoiceId'] == null)
+                if (_canCreateSales &&
+                    order['invoiceId'] == null &&
+                    ['completed', 'delivered'].contains(order['status']))
                   OutlinedButton.icon(
                     onPressed: () {
                       Navigator.pop(sheet);
@@ -746,6 +781,32 @@ class _MaintenanceManagementScreenState
                     ),
                   ),
               ],
+            ),
+            const Divider(height: 30),
+            Text(
+              context.loc.text('متابعة التواصل', 'Customer contacts'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            if (_list(order['contacts']).isEmpty)
+              ListTile(
+                leading: const Icon(Icons.phone_disabled_outlined),
+                title: Text(
+                  context.loc.text(
+                    'لم يُسجل تواصل مع العميل بعد.',
+                    'No customer contact has been recorded yet.',
+                  ),
+                ),
+              ),
+            ..._list(order['contacts']).map(
+              (contact) => ListTile(
+                leading: const Icon(Icons.contact_phone_outlined),
+                title: Text(
+                  '${_contactMethodLabel(contact['method']?.toString())} • ${_contactResultLabel(contact['result']?.toString())}',
+                ),
+                subtitle: Text(
+                  '${contact['note'] ?? ''}\n${_map(contact['actor'])['name'] ?? ''} • ${contact['createdAt'] ?? ''}',
+                ),
+              ),
             ),
             const Divider(height: 30),
             Text(
@@ -792,6 +853,7 @@ class _MaintenanceManagementScreenState
   }
 
   Future<void> _editOrder(Map<String, dynamic> order) async {
+    final formKey = GlobalKey<FormState>();
     String status = order['status']?.toString() ?? 'received';
     String? employee = _map(order['assignedTo'])['id']?.toString();
     final diagnosis = TextEditingController(
@@ -812,98 +874,125 @@ class _MaintenanceManagementScreenState
           content: SizedBox(
             width: 600,
             child: SingleChildScrollView(
-              child: Column(
-                children: [
-                  DropdownButtonFormField<String>(
-                    initialValue: status,
-                    decoration: InputDecoration(
-                      labelText: context.loc.text('الحالة', 'Status'),
-                    ),
-                    items: _statuses
-                        .map(
-                          (s) => DropdownMenuItem(
-                            value: s,
-                            child: Text(_statusLabel(s)),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (v) => setLocal(() => status = v ?? status),
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: employee,
-                    decoration: InputDecoration(
-                      labelText: context.loc.text(
-                        'الفني المسؤول',
-                        'Technician',
+              child: Form(
+                key: formKey,
+                child: Column(
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: status,
+                      decoration: InputDecoration(
+                        labelText: context.loc.text('الحالة', 'Status'),
                       ),
+                      items: _allowedNextStatuses(order)
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(_statusLabel(s)),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) => setLocal(() => status = v ?? status),
                     ),
-                    items: _employees
-                        .map(
-                          (e) => DropdownMenuItem(
-                            value: e['id']?.toString(),
-                            child: Text(e['name']?.toString() ?? ''),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (v) => setLocal(() => employee = v),
-                  ),
-                  _field(
-                    diagnosis,
-                    context.loc.text('التشخيص', 'Diagnosis'),
-                    lines: 2,
-                  ),
-                  _field(
-                    notes,
-                    context.loc.text('ملاحظات العمل', 'Work notes'),
-                    lines: 2,
-                  ),
-                  _field(
-                    location,
-                    context.loc.text('مكان الجهاز', 'Device location'),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _field(
-                          labor,
-                          context.loc.text('أجرة العمل', 'Labor'),
-                          type: TextInputType.number,
+                    DropdownButtonFormField<String>(
+                      initialValue: employee,
+                      decoration: InputDecoration(
+                        labelText: context.loc.text(
+                          ['completed', 'delivered'].contains(status)
+                              ? 'الفني المسؤول *'
+                              : 'الفني المسؤول',
+                          ['completed', 'delivered'].contains(status)
+                              ? 'Technician *'
+                              : 'Technician',
                         ),
                       ),
-                      if (_canViewProfits) ...[
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _field(
-                            other,
-                            context.loc.text('تكلفة أخرى', 'Other cost'),
-                            type: TextInputType.number,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  if (_canCreateSales)
+                      items: _employees
+                          .map(
+                            (e) => DropdownMenuItem(
+                              value: e['id']?.toString(),
+                              child: Text(e['name']?.toString() ?? ''),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) => setLocal(() => employee = v),
+                      validator: (_) =>
+                          ['completed', 'delivered'].contains(status) &&
+                              employee == null
+                          ? context.loc.text(
+                              'حدد الفني المسؤول.',
+                              'Select the technician.',
+                            )
+                          : null,
+                    ),
+                    _field(
+                      diagnosis,
+                      context.loc.text(
+                        ['completed', 'delivered'].contains(status)
+                            ? 'التشخيص *'
+                            : 'التشخيص',
+                        ['completed', 'delivered'].contains(status)
+                            ? 'Diagnosis *'
+                            : 'Diagnosis',
+                      ),
+                      lines: 2,
+                      required: ['completed', 'delivered'].contains(status),
+                    ),
+                    _field(
+                      notes,
+                      context.loc.text('ملاحظات العمل', 'Work notes'),
+                      lines: 2,
+                    ),
+                    _field(
+                      location,
+                      context.loc.text('مكان الجهاز *', 'Device location *'),
+                      required: true,
+                    ),
                     Row(
                       children: [
                         Expanded(
                           child: _field(
-                            discount,
-                            context.loc.text('الخصم', 'Discount'),
+                            labor,
+                            context.loc.text('أجرة العمل', 'Labor'),
                             type: TextInputType.number,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _field(
-                            paid,
-                            context.loc.text('المدفوع', 'Paid'),
-                            type: TextInputType.number,
+                        if (_canViewProfits) ...[
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _field(
+                              other,
+                              context.loc.text('تكلفة أخرى', 'Other cost'),
+                              type: TextInputType.number,
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
-                  _field(logNote, context.loc.text('ملاحظة للسجل', 'Log note')),
-                ],
+                    if (_canCreateSales)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _field(
+                              discount,
+                              context.loc.text('الخصم', 'Discount'),
+                              type: TextInputType.number,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _field(
+                              paid,
+                              context.loc.text('المدفوع', 'Paid'),
+                              type: TextInputType.number,
+                            ),
+                          ),
+                        ],
+                      ),
+                    _field(
+                      logNote,
+                      context.loc.text('ملاحظة للسجل', 'Log note'),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -913,7 +1002,11 @@ class _MaintenanceManagementScreenState
               child: Text(context.loc.text('إلغاء', 'Cancel')),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(dialog, true),
+              onPressed: () {
+                if (formKey.currentState?.validate() == true) {
+                  Navigator.pop(dialog, true);
+                }
+              },
               child: Text(context.loc.text('حفظ', 'Save')),
             ),
           ],
@@ -1158,15 +1251,69 @@ class _MaintenanceManagementScreenState
     String label, {
     int lines = 1,
     TextInputType? type,
+    bool required = false,
   }) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
-    child: TextField(
+    child: TextFormField(
       controller: c,
       maxLines: lines,
       keyboardType: type,
       decoration: InputDecoration(labelText: label),
+      validator: required
+          ? (value) => value == null || value.trim().isEmpty
+                ? context.loc.text(
+                    'هذا الحقل مطلوب.',
+                    'This field is required.',
+                  )
+                : null
+          : null,
     ),
   );
+
+  List<String> _allowedNextStatuses(Map<String, dynamic> order) {
+    final current = order['status']?.toString() ?? 'received';
+    final transitions = _map(_data['statusTransitions']);
+    final next = transitions[current] is List
+        ? List<String>.from(transitions[current] as List)
+        : const <String>[];
+    return {current, ...next}.toList();
+  }
+
+  Future<void> _exportCsv() async {
+    final buffer = StringBuffer()
+      ..writeln(
+        '\uFEFForder_number,status,priority,customer_name,customer_phone,device_type,brand,model,serial_number,location,technician,total,paid,due,created_at',
+      );
+    for (final order in _orders) {
+      final row = [
+        order['orderNumber'],
+        _statusLabel(order['status']?.toString() ?? ''),
+        order['priority'],
+        order['customerName'],
+        order['customerPhone'],
+        order['deviceType'],
+        order['brand'],
+        order['model'],
+        order['serialNumber'],
+        order['location'],
+        _map(order['assignedTo'])['name'],
+        order['total'],
+        order['paidAmount'],
+        order['dueAmount'],
+        order['createdAt'],
+      ].map(_csvCell).join(',');
+      buffer.writeln(row);
+    }
+    await FileSaver.instance.saveFile(
+      name: 'maintenance_${DateTime.now().toIso8601String().substring(0, 10)}',
+      bytes: Uint8List.fromList(utf8.encode(buffer.toString())),
+      fileExtension: 'csv',
+      mimeType: MimeType.csv,
+    );
+  }
+
+  String _csvCell(dynamic value) =>
+      '"${(value ?? '').toString().replaceAll('"', '""')}"';
   Widget _info(String label, dynamic value) => Padding(
     padding: const EdgeInsets.only(bottom: 8),
     child: Row(
@@ -1207,16 +1354,6 @@ class _MaintenanceManagementScreenState
       : const [];
   static Map<String, dynamic> _map(dynamic v) =>
       v is Map ? Map<String, dynamic>.from(v) : const {};
-  static const _statuses = [
-    'received',
-    'diagnosing',
-    'waiting_customer',
-    'waiting_parts',
-    'in_progress',
-    'completed',
-    'delivered',
-    'cancelled',
-  ];
   String _statusLabel(String s) =>
       {
         'received': 'مستلمة',
@@ -1244,6 +1381,21 @@ class _MaintenanceManagementScreenState
     }
     return _statusLabel(log['toStatus']?.toString() ?? '');
   }
+
+  String _contactMethodLabel(String? method) => switch (method) {
+    'sms' => 'SMS',
+    'whatsapp' => context.loc.text('واتساب', 'WhatsApp'),
+    'in_person' => context.loc.text('حضوري', 'In person'),
+    _ => context.loc.text('اتصال', 'Call'),
+  };
+
+  String _contactResultLabel(String? result) => switch (result) {
+    'answered' => context.loc.text('تم الرد', 'Answered'),
+    'no_answer' => context.loc.text('لم يرد', 'No answer'),
+    'confirmed' => context.loc.text('تم التأكيد', 'Confirmed'),
+    'declined' => context.loc.text('رفض', 'Declined'),
+    _ => context.loc.text('محاولة تواصل', 'Attempted'),
+  };
 
   IconData _statusIcon(String s) =>
       {

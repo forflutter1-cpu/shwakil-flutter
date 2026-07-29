@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
+import 'package:file_saver/file_saver.dart';
 import 'package:flutter/material.dart';
 
 import '../services/index.dart';
@@ -486,14 +490,14 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           TextField(
             controller: name,
             decoration: InputDecoration(
-              labelText: l.text('اسم الصنف', 'Item name'),
+              labelText: l.text('اسم الصنف *', 'Item name *'),
             ),
           ),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
             initialValue: baseUnit,
             decoration: InputDecoration(
-              labelText: l.text('الوحدة الأساسية', 'Base unit'),
+              labelText: l.text('الوحدة الأساسية *', 'Base unit *'),
             ),
             items: [
               DropdownMenuItem(
@@ -763,7 +767,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             DropdownButtonFormField<String>(
               initialValue: type,
               decoration: InputDecoration(
-                labelText: l.text('نوع الحساب', 'Account type'),
+                labelText: l.text('نوع الحساب *', 'Account type *'),
               ),
               items: [
                 DropdownMenuItem(
@@ -822,12 +826,17 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             const SizedBox(height: 10),
             TextField(
               controller: name,
-              decoration: InputDecoration(labelText: l.text('الاسم', 'Name')),
+              decoration: InputDecoration(
+                labelText: l.text('الاسم *', 'Name *'),
+              ),
             ),
             TextField(
               controller: phone,
               decoration: InputDecoration(
-                labelText: l.text('رقم الهاتف', 'Phone number'),
+                labelText: l.text(
+                  'رقم الهاتف (اختياري)',
+                  'Phone number (optional)',
+                ),
               ),
             ),
           ],
@@ -1174,7 +1183,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             const SizedBox(height: 12),
             if (!quickSale)
               DropdownButtonFormField<String>(
-                value: warehouseId,
+                initialValue: warehouseId,
                 decoration: InputDecoration(
                   labelText: l.text('المخزن', 'Warehouse'),
                   prefixIcon: const Icon(Icons.warehouse_rounded),
@@ -1705,21 +1714,24 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           _money(_summary['profitToday']),
           Icons.trending_up,
         ),
-      (
-        l.text('قيمة المخزون', 'Inventory value'),
-        _money(_summary['inventoryValue']),
-        Icons.warehouse,
-      ),
-      (
-        l.text('ديون الزبائن', 'Customer debts'),
-        _money(_summary['customerDebts']),
-        Icons.person,
-      ),
-      (
-        l.text('ديون التجار', 'Supplier debts'),
-        _money(_summary['supplierDebts']),
-        Icons.local_shipping,
-      ),
+      if (_permissions.canViewStoreProfits)
+        (
+          l.text('قيمة المخزون', 'Inventory value'),
+          _money(_summary['inventoryValue']),
+          Icons.warehouse,
+        ),
+      if (_permissions.canManageStoreDebts || _permissions.canViewStoreReports)
+        (
+          l.text('ديون الزبائن', 'Customer debts'),
+          _money(_summary['customerDebts']),
+          Icons.person,
+        ),
+      if (_permissions.canManageStoreDebts || _permissions.canViewStoreReports)
+        (
+          l.text('ديون التجار', 'Supplier debts'),
+          _money(_summary['supplierDebts']),
+          Icons.local_shipping,
+        ),
     ];
     return ListView(
       children: [
@@ -2389,7 +2401,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             controller: name,
             onChanged: (_) => setState(() {}),
             decoration: InputDecoration(
-              labelText: context.loc.text('اسم المخزن', 'Warehouse name'),
+              labelText: context.loc.text('اسم المخزن *', 'Warehouse name *'),
             ),
           ),
           const SizedBox(height: 10),
@@ -2443,7 +2455,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
       builder: (_, setState) => Column(
         children: [
           DropdownButtonFormField<String>(
-            value: fromId,
+            initialValue: fromId,
             decoration: InputDecoration(
               labelText: context.loc.text('من مخزن', 'From warehouse'),
             ),
@@ -2459,7 +2471,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           ),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
-            value: toId,
+            initialValue: toId,
             decoration: InputDecoration(
               labelText: context.loc.text('إلى مخزن', 'To warehouse'),
             ),
@@ -2537,6 +2549,48 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     }
     return Column(
       children: [
+        if (_permissions.canManageStoreInventory) ...[
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _exportProductsCsv,
+                  icon: const Icon(Icons.download_rounded),
+                  label: Text(
+                    context.loc.text('تصدير الأصناف', 'Export items'),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _importProductsCsv,
+                  icon: const Icon(Icons.upload_file_rounded),
+                  label: Text(context.loc.text('استيراد CSV', 'Import CSV')),
+                ),
+                TextButton.icon(
+                  onPressed: _downloadProductsTemplate,
+                  icon: const Icon(Icons.description_outlined),
+                  label: Text(
+                    context.loc.text('نموذج الاستيراد', 'Import template'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Text(
+              context.loc.text(
+                'الاستيراد ينشئ أو يحدّث تعريف الأصناف فقط؛ أرصدة المخزون تُسجل نظاميًا عبر فواتير الشراء أو التحويل بين المخازن.',
+                'Import creates or updates item definitions only; stock balances must be recorded through purchase invoices or warehouse transfers.',
+              ),
+              style: AppTheme.caption,
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
         _searchField(
           controller: _productSearchController,
           label: context.loc.text('بحث في الأصناف', 'Search items'),
@@ -2598,6 +2652,178 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         ),
       ],
     );
+  }
+
+  Future<void> _exportProductsCsv() async {
+    final buffer = StringBuffer()
+      ..writeln(
+        '\uFEFFname,base_unit,purchase_price,sale_price,minimum_stock,barcode,stock_quantity',
+      );
+    for (final product in _products) {
+      final units = _list(product['units']);
+      final base = units.firstWhere(
+        (unit) => unit['isBase'] == true,
+        orElse: () =>
+            units.isNotEmpty ? units.first : const <String, dynamic>{},
+      );
+      buffer.writeln(
+        [
+          product['name'],
+          product['baseUnit'],
+          base['purchasePrice'] ?? product['averagePurchaseCost'],
+          product['defaultSalePrice'],
+          product['minimumStock'],
+          base['barcode'],
+          product['stockQuantity'],
+        ].map(_csvCell).join(','),
+      );
+    }
+    await _saveCsv(
+      'inventory_${DateTime.now().toIso8601String().substring(0, 10)}',
+      buffer.toString(),
+    );
+  }
+
+  Future<void> _downloadProductsTemplate() => _saveCsv(
+    'inventory_import_template',
+    '\uFEFFname,base_unit,purchase_price,sale_price,minimum_stock,barcode\n'
+        'مثال صنف,piece,10,15,5,123456789\n',
+  );
+
+  Future<void> _importProductsCsv() async {
+    final l = context.loc;
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['csv'],
+      withData: true,
+    );
+    final bytes = picked?.files.single.bytes;
+    if (bytes == null) return;
+    final lines = const LineSplitter().convert(
+      utf8.decode(bytes, allowMalformed: true),
+    );
+    if (lines.length < 2) {
+      _showMessage(l.text('ملف الاستيراد فارغ.', 'The import file is empty.'));
+      return;
+    }
+    final headers = _parseCsvLine(
+      lines.first.replaceFirst('\uFEFF', ''),
+    ).map((value) => value.trim().toLowerCase()).toList();
+    final requiredHeaders = [
+      'name',
+      'base_unit',
+      'purchase_price',
+      'sale_price',
+    ];
+    if (!requiredHeaders.every(headers.contains)) {
+      _showMessage(
+        l.text(
+          'عناوين الملف غير صحيحة. استخدم نموذج الاستيراد المعتمد.',
+          'Invalid columns. Please use the official import template.',
+        ),
+      );
+      return;
+    }
+    var imported = 0;
+    var skipped = 0;
+    for (final line in lines.skip(1)) {
+      if (line.trim().isEmpty) continue;
+      final values = _parseCsvLine(line);
+      String value(String key) {
+        final index = headers.indexOf(key);
+        return index >= 0 && index < values.length ? values[index].trim() : '';
+      }
+
+      final name = value('name');
+      final baseUnit = value('base_unit');
+      final purchase = double.tryParse(value('purchase_price'));
+      final sale = double.tryParse(value('sale_price'));
+      if (name.isEmpty ||
+          baseUnit.isEmpty ||
+          purchase == null ||
+          sale == null ||
+          purchase < 0 ||
+          sale < 0) {
+        skipped++;
+        continue;
+      }
+      final existing = _products.firstWhere(
+        (product) =>
+            product['name']?.toString().trim().toLowerCase() ==
+            name.toLowerCase(),
+        orElse: () => const <String, dynamic>{},
+      );
+      await _store.queueProduct(
+        userId: _userId,
+        serverId: existing['id']?.toString(),
+        clientRef: existing['clientRef']?.toString(),
+        name: name,
+        baseUnit: baseUnit,
+        minimumStock: double.tryParse(value('minimum_stock')) ?? 0,
+        salePrice: sale,
+        units: [
+          {
+            'name': _unitName(baseUnit),
+            'code': baseUnit,
+            'factorToBase': 1,
+            'isBase': true,
+            'purchasePrice': purchase,
+            'salePrice': sale,
+            'barcode': value('barcode'),
+          },
+        ],
+      );
+      imported++;
+    }
+    if (imported > 0) await _showLocalThenSync();
+    _showMessage(
+      l.text(
+        'تم استيراد $imported صنف${skipped > 0 ? '، وتجاوز $skipped صف غير صالح' : ''}.',
+        'Imported $imported items${skipped > 0 ? '; skipped $skipped invalid rows' : ''}.',
+      ),
+    );
+  }
+
+  Future<void> _saveCsv(String name, String content) =>
+      FileSaver.instance.saveFile(
+        name: name,
+        bytes: Uint8List.fromList(utf8.encode(content)),
+        fileExtension: 'csv',
+        mimeType: MimeType.csv,
+      );
+
+  String _csvCell(dynamic value) =>
+      '"${(value ?? '').toString().replaceAll('"', '""')}"';
+
+  List<String> _parseCsvLine(String line) {
+    final values = <String>[];
+    final current = StringBuffer();
+    var quoted = false;
+    for (var i = 0; i < line.length; i++) {
+      final char = line[i];
+      if (char == '"') {
+        if (quoted && i + 1 < line.length && line[i + 1] == '"') {
+          current.write('"');
+          i++;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (char == ',' && !quoted) {
+        values.add(current.toString());
+        current.clear();
+      } else {
+        current.write(char);
+      }
+    }
+    values.add(current.toString());
+    return values;
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _invoicesView() => Column(
@@ -2809,6 +3035,27 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
 
   Widget _reportsView() {
     final l = context.loc;
+    if (!_permissions.canViewStoreReports) {
+      return Center(
+        child: ShwakelCard(
+          child: ListTile(
+            leading: const Icon(Icons.lock_outline_rounded),
+            title: Text(
+              l.text(
+                'التقارير محمية بصلاحية مستقلة',
+                'Reports require a dedicated permission',
+              ),
+            ),
+            subtitle: Text(
+              l.text(
+                'يمكن لمالك الحساب منح صلاحية عرض تقارير المحل لهذا الموظف من إدارة المستخدمين التابعين.',
+                'The account owner can grant this employee store-report access from sub-user management.',
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     final now = DateTime.now();
     final sales = _invoices.where((item) => item['type'] == 'sale').toList();
     double salesIn(Duration duration) => sales
@@ -2861,7 +3108,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
 
     return ListView(
       children: [
-        if (_warehouses.isNotEmpty) ...[
+        if (_warehouses.isNotEmpty && _permissions.canViewStoreProfits) ...[
           Text(l.text('تقرير المخازن', 'Warehouse report'), style: AppTheme.h3),
           const SizedBox(height: 8),
           ..._warehouses.map((warehouse) {
@@ -2871,10 +3118,25 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                 (item) => item['warehouseId']?.toString() == warehouseId,
                 orElse: () => const {},
               );
-              return sum + ((stock['quantity'] as num?)?.toDouble() ?? 0) * ((product['averagePurchaseCost'] as num?)?.toDouble() ?? 0);
+              return sum +
+                  ((stock['quantity'] as num?)?.toDouble() ?? 0) *
+                      ((product['averagePurchaseCost'] as num?)?.toDouble() ??
+                          0);
             });
-            final salesTotal = sales.where((invoice) => invoice['warehouseId']?.toString() == warehouseId).fold<double>(0, (sum, invoice) => sum + ((invoice['total'] as num?)?.toDouble() ?? 0));
-            return _reportTile('${warehouse['name'] ?? ''}', '${l.text('قيمة المخزون', 'Inventory value')}: ${_money(value)} • ${l.text('المبيعات', 'Sales')}: ${_money(salesTotal)}');
+            final salesTotal = sales
+                .where(
+                  (invoice) =>
+                      invoice['warehouseId']?.toString() == warehouseId,
+                )
+                .fold<double>(
+                  0,
+                  (sum, invoice) =>
+                      sum + ((invoice['total'] as num?)?.toDouble() ?? 0),
+                );
+            return _reportTile(
+              '${warehouse['name'] ?? ''}',
+              '${l.text('قيمة المخزون', 'Inventory value')}: ${_money(value)} • ${l.text('المبيعات', 'Sales')}: ${_money(salesTotal)}',
+            );
           }),
           const Divider(height: 28),
         ],
@@ -2899,10 +3161,11 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             l.text('إجمالي الأرباح الظاهرة', 'Total visible profits'),
             _money(profit),
           ),
-        _reportTile(
-          l.text('قيمة المخزون', 'Inventory value'),
-          _money(_summary['inventoryValue']),
-        ),
+        if (_permissions.canViewStoreProfits)
+          _reportTile(
+            l.text('قيمة المخزون', 'Inventory value'),
+            _money(_summary['inventoryValue']),
+          ),
         _reportTile(
           l.text('ديون الزبائن', 'Customer debts'),
           _money(_summary['customerDebts']),
