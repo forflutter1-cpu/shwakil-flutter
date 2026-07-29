@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -2072,6 +2073,13 @@ class StoreManagementService {
   };
 
   Future<String> _encode(Object payload) async {
+    // flutter_secure_storage's web implementation can fail while resolving a
+    // browser key ("null.toString" in minified web builds). Browser storage is
+    // already scoped to the signed-in browser profile, so keep the offline
+    // cache plain on web and reserve AES/keychain storage for native apps.
+    if (kIsWeb) {
+      return jsonEncode(payload);
+    }
     final secretKey = await _getOrCreateSecretKey();
     final box = await _cipher.encrypt(
       utf8.encode(jsonEncode(payload)),
@@ -2104,6 +2112,11 @@ class StoreManagementService {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is Map && decoded['v'] == 1) {
+        // Existing encrypted browser cache cannot reliably use the native
+        // secure-storage key. It will be rebuilt from the server on refresh.
+        if (kIsWeb) {
+          return null;
+        }
         final clear = await _cipher.decrypt(
           SecretBox(
             base64Decode(decoded['cipherText']?.toString() ?? ''),
