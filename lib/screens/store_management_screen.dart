@@ -65,11 +65,20 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
   @override
   void initState() {
     super.initState();
+    ConnectivityService.instance.isOnline.addListener(_handleConnectivity);
     unawaited(_load());
+  }
+
+  void _handleConnectivity() {
+    if (ConnectivityService.instance.isOnline.value && _pending.isNotEmpty) {
+      unawaited(_sync());
+    }
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    ConnectivityService.instance.isOnline.removeListener(_handleConnectivity);
     _productSearchController.dispose();
     _partySearchController.dispose();
     _tabs.dispose();
@@ -2150,6 +2159,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     'party' => Icons.people_alt_rounded,
     'payment' => Icons.payments_rounded,
     'workspace' => Icons.storefront_rounded,
+    'maintenance' => Icons.build_circle_rounded,
     _ => Icons.sync_problem_rounded,
   };
 
@@ -2172,6 +2182,29 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     }
     if (entity == 'workspace') {
       return l.text('تحديث إعدادات المتجر', 'Store settings update');
+    }
+    if (entity == 'maintenance') {
+      final action = operation['action']?.toString() ?? '';
+      return switch (action) {
+        'create' => l.text('استلام صيانة معلّق', 'Pending maintenance receipt'),
+        'add_part' => l.text(
+          'سحب قطعة للصيانة معلّق',
+          'Pending maintenance part usage',
+        ),
+        'remove_part' => l.text(
+          'إرجاع قطعة صيانة معلّق',
+          'Pending maintenance part return',
+        ),
+        'finalize' => l.text(
+          'فاتورة صيانة معلّقة',
+          'Pending maintenance invoice',
+        ),
+        'contact' => l.text(
+          'تواصل عميل صيانة معلّق',
+          'Pending maintenance contact',
+        ),
+        _ => l.text('تحديث صيانة معلّق', 'Pending maintenance update'),
+      };
     }
     return l.text('عملية مزامنة معلقة', 'Pending sync operation');
   }
@@ -2200,6 +2233,16 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     }
     if (entity == 'workspace') {
       return operation['name']?.toString() ?? '';
+    }
+    if (entity == 'maintenance') {
+      final device = operation['deviceType']?.toString() ?? '';
+      final customer = operation['customerName']?.toString() ?? '';
+      final status = operation['status']?.toString() ?? '';
+      return [
+        customer,
+        device,
+        status,
+      ].where((value) => value.isNotEmpty).join(' • ');
     }
     return '';
   }

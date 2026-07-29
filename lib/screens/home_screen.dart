@@ -613,7 +613,10 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
         _isSyncingOfflineWorkspace) {
       return;
     }
-    final needsSync = _pendingOfflineCount > 0 || _offlineAccessExpired;
+    final needsSync =
+        _pendingOfflineCount > 0 ||
+        _pendingStoreManagementCount > 0 ||
+        _offlineAccessExpired;
     if (!needsSync) {
       return;
     }

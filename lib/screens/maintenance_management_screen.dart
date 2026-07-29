@@ -52,11 +52,20 @@ class _MaintenanceManagementScreenState
   @override
   void initState() {
     super.initState();
+    ConnectivityService.instance.isOnline.addListener(_handleConnectivity);
     unawaited(_bootstrap());
+  }
+
+  void _handleConnectivity() {
+    if (ConnectivityService.instance.isOnline.value && _pendingCount > 0) {
+      unawaited(_load());
+    }
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    ConnectivityService.instance.isOnline.removeListener(_handleConnectivity);
     _tabs.dispose();
     _search.dispose();
     super.dispose();
