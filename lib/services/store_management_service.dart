@@ -398,6 +398,8 @@ class StoreManagementService {
     double discount = 0,
     String notes = '',
     bool quickSale = false,
+    String? actorUserId,
+    String? actorName,
   }) async {
     if (invoiceType == 'sale') {
       await _validateStoreStock(
@@ -423,6 +425,8 @@ class StoreManagementService {
       'discount': discount,
       'notes': notes.trim(),
       'quickSale': quickSale,
+      'actorUserId': ?actorUserId,
+      'actorName': ?actorName,
       'occurredAt': DateTime.now().toIso8601String(),
       'items': items,
     });
@@ -509,6 +513,8 @@ class StoreManagementService {
     required double amount,
     String method = 'cash',
     String notes = '',
+    String? actorUserId,
+    String? actorName,
   }) {
     return _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
@@ -523,6 +529,8 @@ class StoreManagementService {
       'amount': amount,
       'method': method,
       'notes': notes.trim(),
+      'actorUserId': ?actorUserId,
+      'actorName': ?actorName,
       'occurredAt': DateTime.now().toIso8601String(),
     });
   }
@@ -786,6 +794,10 @@ class StoreManagementService {
     );
     final orders = _list(maintenance['orders']);
     final action = op['action']?.toString();
+    final actor = {
+      'id': op['actorUserId']?.toString() ?? '',
+      'name': op['actorName']?.toString() ?? '',
+    };
     if (action == 'create') {
       final ref = op['clientRef'].toString();
       orders.insert(0, {
@@ -796,8 +808,19 @@ class StoreManagementService {
         'status': 'received',
         'priority': op['priority'] ?? 'normal',
         'parts': [],
-        'logs': [],
+        'logs': [
+          {
+            'id': 'local:log:$ref',
+            'action': 'created',
+            'fromStatus': null,
+            'toStatus': 'received',
+            'note': '',
+            'actor': actor,
+            'createdAt': op['createdAt'],
+          },
+        ],
         'contacts': [],
+        'receivedBy': actor,
         'partsPrice': 0.0,
         'partsCost': 0.0,
         'laborPrice': 0.0,
@@ -820,7 +843,30 @@ class StoreManagementService {
       if (index >= 0) {
         final order = Map<String, dynamic>.from(orders[index]);
         if (action == 'update') {
+          final oldStatus = order['status']?.toString();
           order.addAll(op);
+          final employeeId = op['assignedToUserId']?.toString();
+          if (employeeId != null && employeeId.isNotEmpty) {
+            order['assignedTo'] = _list(maintenance['employees']).firstWhere(
+              (employee) => employee['id']?.toString() == employeeId,
+              orElse: () => {'id': employeeId, 'name': ''},
+            );
+          }
+          if (op['status'] == 'delivered') order['deliveredBy'] = actor;
+          order['logs'] = [
+            {
+              'id': 'local:log:${op['clientRef']}',
+              'action': oldStatus == op['status']
+                  ? 'updated'
+                  : 'status_changed',
+              'fromStatus': oldStatus,
+              'toStatus': op['status'],
+              'note': op['note'] ?? '',
+              'actor': actor,
+              'createdAt': op['createdAt'],
+            },
+            ..._list(order['logs']),
+          ];
           order['pendingSync'] = true;
         } else if (action == 'add_part') {
           final parts = _list(order['parts']);
@@ -907,6 +953,7 @@ class StoreManagementService {
               'method': op['method'] ?? 'call',
               'result': op['result'] ?? 'attempted',
               'note': op['note'] ?? '',
+              'actor': actor,
               'createdAt': op['createdAt'],
               'pendingSync': true,
             },
@@ -1247,7 +1294,8 @@ class StoreManagementService {
       'notes': operation['notes']?.toString() ?? '',
       'publicToken': '',
       'shareUrl': '',
-      'createdByUserId': '',
+      'createdByUserId': operation['actorUserId']?.toString() ?? '',
+      'cashierName': operation['actorName']?.toString() ?? '',
       'occurredAt': occurredAt,
       'items': preparedItems,
     };
@@ -1402,7 +1450,8 @@ class StoreManagementService {
       'amount': amount,
       'reference': operation['reference'] ?? '',
       'notes': operation['notes'] ?? '',
-      'createdByUserId': '',
+      'createdByUserId': operation['actorUserId']?.toString() ?? '',
+      'actorName': operation['actorName']?.toString() ?? '',
       'occurredAt':
           operation['occurredAt']?.toString() ??
           DateTime.now().toIso8601String(),

@@ -32,6 +32,7 @@ class _MaintenanceManagementScreenState
   String? _error;
   String _status = '';
   String? _userId;
+  String _actorName = '';
   int _pendingCount = 0;
   bool _offline = false;
 
@@ -74,6 +75,11 @@ class _MaintenanceManagementScreenState
   Future<void> _bootstrap() async {
     final user = await _auth.currentUser();
     _userId = user?['id']?.toString();
+    _actorName = user?['fullName']?.toString().trim().isNotEmpty == true
+        ? user!['fullName'].toString()
+        : user?['name']?.toString().trim().isNotEmpty == true
+        ? user!['name'].toString()
+        : user?['username']?.toString() ?? '';
     if (_userId != null) {
       final cached = await _offlineStore.getMaintenanceSnapshot(_userId!);
       if (cached.isNotEmpty && mounted) {
@@ -1310,6 +1316,8 @@ class _MaintenanceManagementScreenState
         part?['clientRef']?.toString() ??
         (partId?.startsWith('local:') == true ? partId!.substring(6) : null);
     final preparedData = Map<String, dynamic>.from(data);
+    preparedData['actorUserId'] = _userId;
+    preparedData['actorName'] = _actorName;
     if (action == 'add_part') {
       final productId = data['productId']?.toString();
       final warehouseId = data['warehouseId']?.toString();

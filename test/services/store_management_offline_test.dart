@@ -122,6 +122,8 @@ void main() {
       invoiceType: 'sale',
       partyId: party['id'] as String,
       partyClientRef: party['clientRef'] as String,
+      actorUserId: 'cashier-1',
+      actorName: 'الكاشير المحلي',
       warehouseId: warehouse['id'] as String,
       paidAmount: 0,
       paymentMethod: 'cash',
@@ -138,6 +140,7 @@ void main() {
     );
     snapshot = await service.getSnapshot(userId);
     final sale = (snapshot['invoices'] as List).first as Map;
+    expect(sale['cashierName'], 'الكاشير المحلي');
     await service.queuePayment(
       userId: userId,
       invoiceId: sale['id'] as String,
@@ -185,10 +188,17 @@ void main() {
           'reportedIssue': 'شاشة مكسورة',
           'deviceCondition': 'مستعمل',
           'location': 'رف 1',
+          'actorUserId': 'employee-1',
+          'actorName': 'موظف الصيانة',
         },
       );
       final maintenance = await service.getMaintenanceSnapshot(userId);
       final order = (maintenance['orders'] as List).first as Map;
+      expect((order['receivedBy'] as Map)['name'], 'موظف الصيانة');
+      expect(
+        ((order['logs'] as List).first['actor'] as Map)['name'],
+        'موظف الصيانة',
+      );
       await service.queueMaintenance(
         userId: userId,
         action: 'add_part',

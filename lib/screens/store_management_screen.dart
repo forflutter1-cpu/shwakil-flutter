@@ -44,6 +44,12 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
 
   AppPermissions get _permissions => AppPermissions.fromUser(_user);
   String get _userId => _user?['id']?.toString() ?? '';
+  String get _actorName =>
+      _user?['fullName']?.toString().trim().isNotEmpty == true
+      ? _user!['fullName'].toString()
+      : _user?['name']?.toString().trim().isNotEmpty == true
+      ? _user!['name'].toString()
+      : _user?['username']?.toString() ?? '';
   List<Map<String, dynamic>> get _products => _list(_snapshot['products']);
   List<Map<String, dynamic>> get _warehouses => _list(_snapshot['warehouses']);
   List<Map<String, dynamic>> get _parties => _list(_snapshot['parties']);
@@ -1524,6 +1530,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             )
             .toList(),
         quickSale: quickSale,
+        actorUserId: _userId,
+        actorName: _actorName,
       );
       await _showLocalThenSync();
     }
@@ -1573,6 +1581,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             ?.toString(),
         direction: invoice['type'] == 'purchase' ? 'out' : 'in',
         amount: value,
+        actorUserId: _userId,
+        actorName: _actorName,
       );
       await _showLocalThenSync();
     }
