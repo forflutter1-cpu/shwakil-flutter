@@ -814,16 +814,16 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
                 children: [
                   Positioned.fill(
                     child: Padding(
-                      padding: const EdgeInsetsDirectional.only(
-                        end: _sidebarWidth + 1,
+                      padding: const EdgeInsets.only(
+                        right: _sidebarWidth + 1,
                       ),
                       child: child,
                     ),
                   ),
-                  PositionedDirectional(
+                  Positioned(
                     top: 0,
                     bottom: 0,
-                    end: 0,
+                    right: 0,
                     child: SizedBox(
                       width: _sidebarWidth,
                       child: AppSidebar(
