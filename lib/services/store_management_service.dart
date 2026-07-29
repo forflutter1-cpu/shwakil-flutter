@@ -497,6 +497,14 @@ class StoreManagementService {
     String? actorUserId,
     String? actorName,
   }) async {
+    _validateInvoiceInput(
+      invoiceType: invoiceType,
+      partyId: partyId,
+      partyClientRef: partyClientRef,
+      paidAmount: paidAmount,
+      discount: discount,
+      items: items,
+    );
     if (invoiceType == 'sale') {
       await _validateStoreStock(
         userId: userId,
@@ -550,6 +558,15 @@ class StoreManagementService {
     required List<Map<String, dynamic>> items,
     String notes = '',
   }) async {
+    if (fromWarehouseId == toWarehouseId) {
+      throw StateError('يجب اختيار مخزنين مختلفين للتحويل.');
+    }
+    if (items.isEmpty ||
+        items.any(
+          (item) => ((item['quantity'] as num?)?.toDouble() ?? 0) <= 0,
+        )) {
+      throw StateError('يجب إضافة كمية صحيحة للتحويل.');
+    }
     final snapshot = await getSnapshot(userId);
     final warehouses = _list(snapshot['warehouses']);
     final fromWarehouse = warehouses
@@ -612,6 +629,15 @@ class StoreManagementService {
     String? actorUserId,
     String? actorName,
   }) {
+    if (amount <= 0) {
+      throw StateError('قيمة الدفعة يجب أن تكون أكبر من صفر.');
+    }
+    if ((invoiceId == null || invoiceId.trim().isEmpty) &&
+        (invoiceClientRef == null || invoiceClientRef.trim().isEmpty) &&
+        (partyId == null || partyId.trim().isEmpty) &&
+        (partyClientRef == null || partyClientRef.trim().isEmpty)) {
+      throw StateError('يجب ربط الدفعة بفاتورة أو حساب.');
+    }
     return _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'payment',
@@ -629,6 +655,46 @@ class StoreManagementService {
       'actorName': ?actorName,
       'occurredAt': DateTime.now().toIso8601String(),
     });
+  }
+
+  void _validateInvoiceInput({
+    required String invoiceType,
+    String? partyId,
+    String? partyClientRef,
+    required double paidAmount,
+    required double discount,
+    required List<Map<String, dynamic>> items,
+  }) {
+    if (!['sale', 'purchase'].contains(invoiceType)) {
+      throw StateError('نوع الفاتورة غير صالح.');
+    }
+    if (items.isEmpty) {
+      throw StateError('يجب إضافة صنف واحد على الأقل للفاتورة.');
+    }
+    var subtotal = 0.0;
+    for (final item in items) {
+      final quantity = (item['quantity'] as num?)?.toDouble() ?? 0;
+      final unitPrice = (item['unitPrice'] as num?)?.toDouble() ?? 0;
+      if (quantity <= 0) {
+        throw StateError('كمية الصنف يجب أن تكون أكبر من صفر.');
+      }
+      if (unitPrice < 0) {
+        throw StateError('سعر الصنف لا يمكن أن يكون سالبًا.');
+      }
+      subtotal += quantity * unitPrice;
+    }
+    if (invoiceType == 'purchase' &&
+        (partyId == null || partyId.trim().isEmpty) &&
+        (partyClientRef == null || partyClientRef.trim().isEmpty)) {
+      throw StateError('يجب اختيار المورد لفاتورة الشراء.');
+    }
+    if (discount < 0 || discount > subtotal) {
+      throw StateError('الخصم لا يمكن أن يتجاوز إجمالي الفاتورة.');
+    }
+    final total = subtotal - discount;
+    if (paidAmount < 0 || paidAmount > total) {
+      throw StateError('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الفاتورة.');
+    }
   }
 
   Future<void> _storeSnapshot(

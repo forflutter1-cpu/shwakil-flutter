@@ -26,10 +26,12 @@ void main() {
         {'name': 'حبة', 'code': 'piece', 'factorToBase': 1, 'isBase': true},
       ],
     );
+    await service.queueParty(userId: userId, type: 'supplier', name: 'مورد');
     var snapshot = await service.getSnapshot(userId);
     final warehouse = (snapshot['warehouses'] as List).first as Map;
     final product = (snapshot['products'] as List).first as Map;
     final unit = (product['units'] as List).first as Map;
+    final supplier = (snapshot['parties'] as List).first as Map;
     final item = {
       'productId': product['id'],
       'productClientRef': product['clientRef'],
@@ -41,6 +43,8 @@ void main() {
     await service.queueInvoice(
       userId: userId,
       invoiceType: 'purchase',
+      partyId: supplier['id'] as String,
+      partyClientRef: supplier['clientRef'] as String,
       warehouseId: warehouse['id'] as String,
       paidAmount: 20,
       paymentMethod: 'cash',
@@ -95,14 +99,19 @@ void main() {
       ],
     );
     await service.queueParty(userId: userId, type: 'customer', name: 'عميل');
+    await service.queueParty(userId: userId, type: 'supplier', name: 'مورد');
     var snapshot = await service.getSnapshot(userId);
     final warehouse = (snapshot['warehouses'] as List).first as Map;
     final product = (snapshot['products'] as List).first as Map;
     final unit = (product['units'] as List).first as Map;
-    final party = (snapshot['parties'] as List).first as Map;
+    final parties = (snapshot['parties'] as List).cast<Map>();
+    final party = parties.firstWhere((item) => item['type'] == 'customer');
+    final supplier = parties.firstWhere((item) => item['type'] == 'supplier');
     await service.queueInvoice(
       userId: userId,
       invoiceType: 'purchase',
+      partyId: supplier['id'] as String,
+      partyClientRef: supplier['clientRef'] as String,
       warehouseId: warehouse['id'] as String,
       paidAmount: 0,
       paymentMethod: 'cash',
@@ -393,13 +402,17 @@ void main() {
         {'name': 'حبة', 'factorToBase': 1, 'isBase': true},
       ],
     );
+    await service.queueParty(userId: userId, type: 'supplier', name: 'مورد');
     final snapshot = await service.getSnapshot(userId);
     final warehouses = (snapshot['warehouses'] as List).cast<Map>();
     final product = (snapshot['products'] as List).first as Map;
     final unit = (product['units'] as List).first as Map;
+    final supplier = (snapshot['parties'] as List).first as Map;
     await service.queueInvoice(
       userId: userId,
       invoiceType: 'purchase',
+      partyId: supplier['id'] as String,
+      partyClientRef: supplier['clientRef'] as String,
       warehouseId: warehouses.first['id'] as String,
       warehouseClientRef: warehouses.first['clientRef'] as String,
       paidAmount: 0,
@@ -548,6 +561,49 @@ void main() {
       expect(await service.getPendingOperations(userId), isEmpty);
     },
   );
+
+  test('invalid accounting operations never enter the offline queue', () async {
+    final service = StoreManagementService();
+    const userId = 'invalid-accounting-user';
+    await expectLater(
+      service.queueInvoice(
+        userId: userId,
+        invoiceType: 'purchase',
+        paidAmount: 0,
+        paymentMethod: 'cash',
+        items: const [
+          {'productId': 'p', 'quantity': 1.0, 'unitPrice': 5.0},
+        ],
+      ),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      service.queueInvoice(
+        userId: userId,
+        invoiceType: 'sale',
+        paidAmount: 0,
+        paymentMethod: 'cash',
+        items: const [],
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => service.queuePayment(userId: userId, direction: 'in', amount: 5),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      service.queueStockTransfer(
+        userId: userId,
+        fromWarehouseId: 'same',
+        toWarehouseId: 'same',
+        items: const [
+          {'productId': 'p', 'quantity': 1.0},
+        ],
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(await service.getPendingOperations(userId), isEmpty);
+  });
 }
 
 class _PartialSyncApi extends ApiService {
