@@ -13,6 +13,7 @@ import '../utils/app_theme.dart';
 import 'app_config.dart';
 import 'auth_service.dart';
 import 'app_version_service.dart';
+import 'connectivity_service.dart';
 import 'error_message_service.dart';
 import 'local_security_service.dart';
 import 'network_client_service.dart';
@@ -35,6 +36,9 @@ class AppAlertService {
   static DateTime? _lastVisibleErrorAt;
   static String? _lastSnackFingerprint;
   static DateTime? _lastSnackAt;
+  static final Map<String, DateTime> _recentCrashFingerprints =
+      <String, DateTime>{};
+  static const Duration _crashDeduplicationWindow = Duration(minutes: 5);
 
   static Future<void> showSuccess(
     BuildContext context, {
@@ -198,6 +202,33 @@ class AppAlertService {
     Map<String, dynamic>? extraContext,
   }) async {
     try {
+      final cleanTitle = TelemetryRedactionService.scrub(title, maxLength: 120);
+      final cleanMessage = TelemetryRedactionService.scrub(
+        message,
+        maxLength: 4000,
+      );
+      final cleanStackTrace = stackTrace == null || stackTrace.trim().isEmpty
+          ? ''
+          : TelemetryRedactionService.scrub(stackTrace, maxLength: 8000);
+      final errorKind = _safeTelemetryValue(
+        'errorKind',
+        extraContext?['errorKind'],
+      );
+      final exceptionClass = _safeTelemetryValue(
+        'exceptionClass',
+        extraContext?['exceptionClass'],
+      );
+      if (!_shouldReportCrash(
+        title: cleanTitle,
+        message: cleanMessage,
+        stackTrace: cleanStackTrace,
+        route: route,
+        errorKind: errorKind,
+        exceptionClass: exceptionClass,
+      )) {
+        return;
+      }
+
       final authService = AuthService();
       final token = await authService.token();
       final currentUser = await authService.currentUser();
@@ -210,13 +241,17 @@ class AppAlertService {
       } catch (_) {}
 
       final payload = <String, dynamic>{
-        'title': TelemetryRedactionService.scrub(title, maxLength: 120),
-        'message': TelemetryRedactionService.scrub(message, maxLength: 4000),
+        'title': cleanTitle,
+        'message': cleanMessage,
         'platform': defaultTargetPlatform.name,
         'route': route ?? '',
         'appVersion': appHeaders['X-App-Version'] ?? '',
         'appBuild': appHeaders['X-App-Build'] ?? '',
         'reportedAt': DateTime.now().toIso8601String(),
+        'isOnline': ConnectivityService.instance.isOnline.value,
+        'isWeb': kIsWeb,
+        'runtimeMode': _runtimeMode,
+        if (kIsWeb) 'url': Uri.base.toString(),
       };
       if (deviceId != null && deviceId.trim().isNotEmpty) {
         payload['deviceId'] = deviceId.trim();
@@ -228,11 +263,8 @@ class AppAlertService {
           maxLength: 4000,
         );
       }
-      if (stackTrace != null && stackTrace.trim().isNotEmpty) {
-        payload['stackTrace'] = TelemetryRedactionService.scrub(
-          stackTrace,
-          maxLength: 8000,
-        );
+      if (cleanStackTrace.isNotEmpty) {
+        payload['stackTrace'] = cleanStackTrace;
       }
 
       if (currentUser != null) {
@@ -260,6 +292,44 @@ class AppAlertService {
           )
           .timeout(const Duration(seconds: 4));
     } catch (_) {}
+  }
+
+  static bool _shouldReportCrash({
+    required String title,
+    required String message,
+    required String stackTrace,
+    required String? route,
+    required String? errorKind,
+    required String? exceptionClass,
+  }) {
+    final fingerprint = [
+      title,
+      message,
+      stackTrace,
+      route?.trim() ?? '',
+      errorKind?.trim() ?? '',
+      exceptionClass?.trim() ?? '',
+    ].join('\u001f');
+    final now = DateTime.now();
+    _recentCrashFingerprints.removeWhere(
+      (_, reportedAt) =>
+          now.difference(reportedAt) >= _crashDeduplicationWindow,
+    );
+    if (_recentCrashFingerprints.containsKey(fingerprint)) {
+      return false;
+    }
+    _recentCrashFingerprints[fingerprint] = now;
+    return true;
+  }
+
+  static String get _runtimeMode {
+    if (kReleaseMode) {
+      return 'release';
+    }
+    if (kProfileMode) {
+      return 'profile';
+    }
+    return 'debug';
   }
 
   static Future<void> reportApiFailure({

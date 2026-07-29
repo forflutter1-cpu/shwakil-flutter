@@ -784,36 +784,44 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
     BuildContext context, {
     required bool hasSession,
   }) {
-    return AnimatedBuilder(
-      animation: appRouteObserver,
-      builder: (context, _) {
-        final routeName = appRouteObserver.currentRouteName;
-        final showSidebar =
-            hasSession &&
-            !_publicRoutes.contains(routeName) &&
-            MediaQuery.sizeOf(context).width >= _desktopBreakpoint;
+    return ValueListenableBuilder<int>(
+      valueListenable: LocalSecurityService.securityStateListenable,
+      builder: (context, _, _) {
+        return AnimatedBuilder(
+          animation: appRouteObserver,
+          builder: (context, _) {
+            final routeName = appRouteObserver.currentRouteName;
+            final showSidebar =
+                hasSession &&
+                !LocalSecurityService.relockRequired &&
+                !_publicRoutes.contains(routeName) &&
+                MediaQuery.sizeOf(context).width >= _desktopBreakpoint;
 
-        if (!showSidebar) {
-          return child;
-        }
+            if (!showSidebar) {
+              return child;
+            }
 
-        final activeRouteName = routeName == '/app-shell' ? '/home' : routeName;
-        return ColoredBox(
-          color: AppTheme.background,
-          child: Row(
-            textDirection: Directionality.of(context),
-            children: [
-              SizedBox(
-                width: _sidebarWidth,
-                child: AppSidebar(
-                  embedded: true,
-                  currentRouteName: activeRouteName,
-                ),
+            final activeRouteName = routeName == '/app-shell'
+                ? '/home'
+                : routeName;
+            return ColoredBox(
+              color: AppTheme.background,
+              child: Row(
+                textDirection: Directionality.of(context),
+                children: [
+                  SizedBox(
+                    width: _sidebarWidth,
+                    child: AppSidebar(
+                      embedded: true,
+                      currentRouteName: activeRouteName,
+                    ),
+                  ),
+                  const VerticalDivider(width: 1, color: AppTheme.border),
+                  Expanded(child: child),
+                ],
               ),
-              const VerticalDivider(width: 1, color: AppTheme.border),
-              Expanded(child: child),
-            ],
-          ),
+            );
+          },
         );
       },
     );
