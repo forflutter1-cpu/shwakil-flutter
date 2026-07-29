@@ -1,6 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:virtual_currency_cards/services/api_service.dart';
 import 'package:virtual_currency_cards/services/store_management_service.dart';
 
 void main() {
@@ -224,4 +225,56 @@ void main() {
       );
     },
   );
+
+  test(
+    'a failed operation stays visible after an earlier operation syncs',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'partial-sync-user';
+      for (final name in ['ينجح', 'يبقى محليًا']) {
+        await service.queueProduct(
+          userId: userId,
+          name: name,
+          baseUnit: 'piece',
+          minimumStock: 0,
+          salePrice: 1,
+          units: const [],
+        );
+      }
+      await expectLater(
+        service.syncPending(userId: userId, api: _PartialSyncApi()),
+        throwsA(isA<StoreManagementSyncException>()),
+      );
+      final snapshot = await service.getSnapshot(userId);
+      final products = (snapshot['products'] as List).cast<Map>();
+      expect(products.map((item) => item['name']), contains('يبقى محليًا'));
+      expect(await service.getPendingOperations(userId), hasLength(1));
+    },
+  );
+}
+
+class _PartialSyncApi extends ApiService {
+  @override
+  Future<Map<String, dynamic>> syncStoreManagement(
+    List<Map<String, dynamic>> operations,
+  ) async {
+    if (operations.single['name'] == 'يبقى محليًا') {
+      throw Exception('offline test failure');
+    }
+    return {
+      'workspace': {
+        'id': 'server-workspace',
+        'name': 'المحل',
+        'currency': 'ILS',
+      },
+      'products': <Map<String, dynamic>>[],
+      'warehouses': <Map<String, dynamic>>[],
+      'parties': <Map<String, dynamic>>[],
+      'invoices': <Map<String, dynamic>>[],
+      'payments': <Map<String, dynamic>>[],
+      'debtBookAccounts': <Map<String, dynamic>>[],
+      'summary': <String, dynamic>{},
+      'syncedAt': DateTime.now().toIso8601String(),
+    };
+  }
 }

@@ -171,7 +171,6 @@ class StoreManagementService {
           _operationPayload(operation),
         ]);
         latestSnapshot = snapshot;
-        await _storeSnapshot(userId, snapshot);
         final index = remaining.indexWhere(
           (item) => _samePendingOperation(item, operation),
         );
@@ -179,6 +178,16 @@ class StoreManagementService {
           remaining.removeAt(index);
         }
         await _storePendingOperations(userId, remaining);
+        Map<String, dynamic> rebaseSource = snapshot;
+        if (operation['entity'] == 'maintenance' ||
+            remaining.any((item) => item['entity'] == 'maintenance')) {
+          final maintenance = await api.getMaintenanceSnapshot();
+          rebaseSource = {...snapshot, 'maintenance': maintenance};
+        }
+        await _storeSnapshot(
+          userId,
+          _replayPendingOperations(rebaseSource, remaining),
+        );
       } catch (error) {
         firstError ??= error;
         final index = remaining.indexWhere(
@@ -204,6 +213,22 @@ class StoreManagementService {
     }
 
     return latestSnapshot ?? refresh(userId: userId, api: api);
+  }
+
+  Map<String, dynamic> _replayPendingOperations(
+    Map<String, dynamic> serverSnapshot,
+    List<Map<String, dynamic>> pending,
+  ) {
+    var rebased = Map<String, dynamic>.from(serverSnapshot);
+    final ordered =
+        pending
+            .map((operation) => Map<String, dynamic>.from(operation))
+            .toList()
+          ..sort(_syncPriorityCompare);
+    for (final operation in ordered) {
+      rebased = _applyLocalOperation(rebased, operation);
+    }
+    return rebased;
   }
 
   Future<void> queueProduct({
