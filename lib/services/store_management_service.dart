@@ -867,6 +867,7 @@ class StoreManagementService {
             },
             ..._list(order['logs']),
           ];
+          _recalculateLocalMaintenanceOrder(order);
           order['pendingSync'] = true;
         } else if (action == 'add_part') {
           final parts = _list(order['parts']);
@@ -875,6 +876,8 @@ class StoreManagementService {
               .firstOrNull;
           final quantity = (op['quantity'] as num?)?.toDouble() ?? 0;
           final price = (op['unitPrice'] as num?)?.toDouble() ?? 0;
+          final averageCost =
+              (product?['averageCost'] as num?)?.toDouble() ?? 0;
           final available =
               (_list(product?['stocks'])
                           .where(
@@ -898,6 +901,8 @@ class StoreManagementService {
             'quantity': quantity,
             'baseQuantity': quantity,
             'unitName': '',
+            'unitCost': averageCost,
+            'costTotal': _money(quantity * averageCost),
             'priceTotal': quantity * price,
             'pendingSync': true,
           });
@@ -910,6 +915,7 @@ class StoreManagementService {
               ((order['partsPrice'] as num?)?.toDouble() ?? 0) +
               ((order['laborPrice'] as num?)?.toDouble() ?? 0) -
               ((order['discount'] as num?)?.toDouble() ?? 0);
+          _recalculateLocalMaintenanceOrder(order);
           _adjustMaintenanceStock(
             maintenance,
             snapshot,
@@ -946,6 +952,7 @@ class StoreManagementService {
               (removed['baseQuantity'] as num?)?.toDouble() ?? 0,
             );
           }
+          _recalculateLocalMaintenanceOrder(order);
         } else if (action == 'contact') {
           order['contacts'] = [
             {
@@ -967,7 +974,154 @@ class StoreManagementService {
       }
     }
     maintenance['orders'] = orders;
+    _refreshLocalMaintenanceReports(maintenance);
     snapshot['maintenance'] = maintenance;
+  }
+
+  void _recalculateLocalMaintenanceOrder(Map<String, dynamic> order) {
+    final parts = _list(order['parts']);
+    final partsPrice = parts.fold<double>(
+      0,
+      (sum, part) => sum + ((part['priceTotal'] as num?)?.toDouble() ?? 0),
+    );
+    final partsCost = parts.fold<double>(
+      0,
+      (sum, part) => sum + ((part['costTotal'] as num?)?.toDouble() ?? 0),
+    );
+    final labor = (order['laborPrice'] as num?)?.toDouble() ?? 0;
+    final otherCost = (order['otherCost'] as num?)?.toDouble() ?? 0;
+    final discount = (order['discount'] as num?)?.toDouble() ?? 0;
+    final paid = (order['paidAmount'] as num?)?.toDouble() ?? 0;
+    final total = max(0, partsPrice + labor - discount);
+    order['partsPrice'] = _money(partsPrice);
+    if (order['partsCost'] != null) order['partsCost'] = _money(partsCost);
+    order['total'] = _money(total);
+    order['dueAmount'] = _money(max(0, total - paid));
+    if (order['profit'] != null) {
+      order['profit'] = _money(total - partsCost - otherCost);
+    }
+  }
+
+  void _refreshLocalMaintenanceReports(Map<String, dynamic> maintenance) {
+    final orders = _list(maintenance['orders']);
+    final permissions = Map<String, dynamic>.from(
+      maintenance['permissions'] as Map? ?? const {},
+    );
+    final canViewReports = permissions['canViewStoreReports'] == true;
+    final canViewProfits = permissions['canViewStoreProfits'] == true;
+    final now = DateTime.now();
+    bool isWithin(Map<String, dynamic> order, String period) {
+      final date = DateTime.tryParse(
+        order['createdAt']?.toString() ?? '',
+      )?.toLocal();
+      if (date == null) return false;
+      if (period == 'today') {
+        return date.year == now.year &&
+            date.month == now.month &&
+            date.day == now.day;
+      }
+      if (period == 'month') {
+        return date.year == now.year && date.month == now.month;
+      }
+      return date.year == now.year;
+    }
+
+    Map<String, dynamic> totals(Iterable<Map<String, dynamic>> values) => {
+      'count': values.length,
+      'revenue': _money(
+        values.fold<double>(
+          0,
+          (sum, order) => sum + ((order['total'] as num?)?.toDouble() ?? 0),
+        ),
+      ),
+      'cost': canViewProfits
+          ? _money(
+              values.fold<double>(
+                0,
+                (sum, order) =>
+                    sum +
+                    ((order['partsCost'] as num?)?.toDouble() ?? 0) +
+                    ((order['otherCost'] as num?)?.toDouble() ?? 0),
+              ),
+            )
+          : null,
+      'profit': canViewProfits
+          ? _money(
+              values.fold<double>(
+                0,
+                (sum, order) =>
+                    sum + ((order['profit'] as num?)?.toDouble() ?? 0),
+              ),
+            )
+          : null,
+    };
+    final operational = {
+      'active': orders
+          .where(
+            (order) => !['delivered', 'cancelled'].contains(order['status']),
+          )
+          .length,
+      'waitingCustomer': orders
+          .where((order) => order['status'] == 'waiting_customer')
+          .length,
+      'completed': orders
+          .where((order) => order['status'] == 'completed')
+          .length,
+    };
+    maintenance['summary'] = canViewReports
+        ? {
+            ...operational,
+            'today': totals(orders.where((order) => isWithin(order, 'today'))),
+            'month': totals(orders.where((order) => isWithin(order, 'month'))),
+            'year': totals(orders.where((order) => isWithin(order, 'year'))),
+          }
+        : operational;
+
+    if (canViewReports) {
+      final grouped = <String, List<Map<String, dynamic>>>{};
+      for (final order in orders) {
+        final assigned = Map<String, dynamic>.from(
+          order['assignedTo'] as Map? ?? const {},
+        );
+        final id = assigned['id']?.toString() ?? '';
+        if (id.isNotEmpty) (grouped[id] ??= []).add(order);
+      }
+      maintenance['technicianPerformance'] = grouped.values.map((items) {
+        final employee = Map<String, dynamic>.from(
+          items.first['assignedTo'] as Map? ?? const {},
+        );
+        return {
+          'employee': employee,
+          'ordersCount': items.length,
+          'activeCount': items
+              .where(
+                (order) =>
+                    !['delivered', 'cancelled'].contains(order['status']),
+              )
+              .length,
+          'completedCount': items
+              .where(
+                (order) => ['completed', 'delivered'].contains(order['status']),
+              )
+              .length,
+          'revenue': _money(
+            items.fold<double>(
+              0,
+              (sum, order) => sum + ((order['total'] as num?)?.toDouble() ?? 0),
+            ),
+          ),
+          'profit': canViewProfits
+              ? _money(
+                  items.fold<double>(
+                    0,
+                    (sum, order) =>
+                        sum + ((order['profit'] as num?)?.toDouble() ?? 0),
+                  ),
+                )
+              : null,
+        };
+      }).toList();
+    }
   }
 
   void _adjustMaintenanceStock(

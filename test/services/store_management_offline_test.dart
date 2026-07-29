@@ -162,10 +162,18 @@ void main() {
       const userId = 'offline-maintenance-stock-user';
       await service.cacheMaintenanceSnapshot(userId, {
         'orders': <Map<String, dynamic>>[],
+        'permissions': {
+          'canViewStoreReports': true,
+          'canViewStoreProfits': true,
+        },
+        'employees': [
+          {'id': 'employee-1', 'name': 'موظف الصيانة'},
+        ],
         'products': [
           {
             'id': 'part-1',
             'name': 'شاشة',
+            'averageCost': 8.0,
             'units': [
               {'id': 'unit-1', 'factor': 1},
             ],
@@ -211,6 +219,29 @@ void main() {
           'quantity': 2.0,
           'unitPrice': 20.0,
         },
+      );
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'update',
+        orderId: order['id'] as String,
+        orderClientRef: order['clientRef'] as String,
+        data: const {
+          'status': 'received',
+          'assignedToUserId': 'employee-1',
+          'laborPrice': 10.0,
+          'actorUserId': 'employee-1',
+          'actorName': 'موظف الصيانة',
+        },
+      );
+      final updated = await service.getMaintenanceSnapshot(userId);
+      final updatedOrder = (updated['orders'] as List).first as Map;
+      expect(updatedOrder['total'], 50.0);
+      expect(updatedOrder['profit'], 34.0);
+      expect(((updated['summary'] as Map)['today'] as Map)['revenue'], 50.0);
+      expect(
+        ((updated['technicianPerformance'] as List).first
+            as Map)['ordersCount'],
+        1,
       );
       final pendingBefore = await service.getPendingOperations(userId);
       await expectLater(
