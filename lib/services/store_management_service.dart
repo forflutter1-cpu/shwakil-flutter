@@ -107,6 +107,13 @@ class StoreManagementService {
     if (action == 'add_part') {
       await _validateMaintenanceStock(userId, data);
     }
+    await _validateMaintenanceOperation(
+      userId: userId,
+      action: action,
+      orderId: orderId,
+      orderClientRef: orderClientRef,
+      data: data,
+    );
     await _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'maintenance',
@@ -119,6 +126,54 @@ class StoreManagementService {
       'createdAt': DateTime.now().toIso8601String(),
       ...data,
     });
+  }
+
+  Future<void> _validateMaintenanceOperation({
+    required String userId,
+    required String action,
+    String? orderId,
+    String? orderClientRef,
+    required Map<String, dynamic> data,
+  }) async {
+    if (action == 'create' || action == 'contact') return;
+    final maintenance = await getMaintenanceSnapshot(userId);
+    final order = _list(maintenance['orders']).firstWhere(
+      (item) =>
+          item['id']?.toString() == orderId ||
+          (orderClientRef != null &&
+              item['clientRef']?.toString() == orderClientRef),
+      orElse: () => const {},
+    );
+    if (order.isEmpty) {
+      throw StateError('طلب الصيانة غير موجود في البيانات المحلية.');
+    }
+    if (action == 'finalize') {
+      if (!['completed', 'delivered'].contains(order['status'])) {
+        throw StateError('يجب إكمال الصيانة قبل إنشاء الفاتورة.');
+      }
+      if (((order['total'] as num?)?.toDouble() ?? 0) <= 0) {
+        throw StateError('يجب أن يكون إجمالي الصيانة أكبر من صفر.');
+      }
+      if (order['invoiceId'] != null) {
+        throw StateError('فاتورة الصيانة منشأة مسبقًا.');
+      }
+    }
+    if (action == 'update') {
+      final from = order['status']?.toString() ?? 'received';
+      final to = data['status']?.toString() ?? from;
+      final transitions = Map<String, dynamic>.from(
+        maintenance['statusTransitions'] as Map? ?? const {},
+      );
+      final allowed = transitions[from] is List
+          ? List<String>.from(transitions[from] as List)
+          : const <String>[];
+      if (to != from && transitions.isNotEmpty && !allowed.contains(to)) {
+        throw StateError('انتقال حالة الصيانة المطلوب غير مسموح.');
+      }
+      if (to == 'delivered' && order['invoiceId'] == null) {
+        throw StateError('يجب إنشاء فاتورة الصيانة قبل تسليم الجهاز.');
+      }
+    }
   }
 
   Future<void> _validateMaintenanceStock(

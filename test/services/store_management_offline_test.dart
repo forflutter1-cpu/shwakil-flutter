@@ -485,6 +485,51 @@ void main() {
     await service.syncPending(userId: userId, api: api);
     expect(api.actions, ['finalize', 'update']);
   });
+
+  test(
+    'invalid maintenance finalization never enters the offline queue',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'invalid-maintenance-finalize-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [
+          {
+            'id': 'order-zero',
+            'clientRef': 'order-zero-ref',
+            'status': 'completed',
+            'total': 0.0,
+            'invoiceId': null,
+            'parts': <Map<String, dynamic>>[],
+            'logs': <Map<String, dynamic>>[],
+            'contacts': <Map<String, dynamic>>[],
+          },
+        ],
+        'statusTransitions': {
+          'completed': ['in_progress', 'delivered'],
+        },
+      });
+      await expectLater(
+        service.queueMaintenance(
+          userId: userId,
+          action: 'finalize',
+          orderId: 'order-zero',
+          orderClientRef: 'order-zero-ref',
+        ),
+        throwsA(isA<StateError>()),
+      );
+      await expectLater(
+        service.queueMaintenance(
+          userId: userId,
+          action: 'update',
+          orderId: 'order-zero',
+          orderClientRef: 'order-zero-ref',
+          data: const {'status': 'delivered'},
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(await service.getPendingOperations(userId), isEmpty);
+    },
+  );
 }
 
 class _PartialSyncApi extends ApiService {
