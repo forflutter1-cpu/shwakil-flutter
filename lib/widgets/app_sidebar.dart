@@ -73,7 +73,13 @@ class _AppSidebarState extends State<AppSidebar> {
     if (!mounted) {
       return;
     }
-    final navigator = Navigator.of(context);
+    // The desktop sidebar is injected by MaterialApp.builder and therefore is
+    // a sibling of the Navigator, not a descendant of it.  Resolve navigation
+    // through the app-level key so desktop menu taps remain functional.
+    final navigator = AppAlertService.navigatorKey.currentState;
+    if (navigator == null) {
+      return;
+    }
     final currentRoute =
         widget.currentRouteName ?? ModalRoute.of(context)?.settings.name ?? '';
     if (!widget.embedded) {
@@ -707,7 +713,7 @@ class _AppSidebarState extends State<AppSidebar> {
       onTap: () async {
         await AppLocaleService.instance.toggleLocale();
         if (context.mounted && !widget.embedded) {
-          Navigator.pop(context);
+          AppAlertService.navigatorKey.currentState?.pop();
         }
       },
     );
@@ -781,7 +787,7 @@ class _AppSidebarState extends State<AppSidebar> {
       onTap: () {
         if (isSelected) {
           if (!widget.embedded) {
-            Navigator.pop(context);
+            AppAlertService.navigatorKey.currentState?.pop();
           }
           return;
         }
@@ -813,7 +819,7 @@ class _AppSidebarState extends State<AppSidebar> {
       ),
       onTap: () async {
         if (!widget.embedded) {
-          Navigator.pop(context);
+          AppAlertService.navigatorKey.currentState?.pop();
         }
         await QuickLogoutAction.logout(context);
       },

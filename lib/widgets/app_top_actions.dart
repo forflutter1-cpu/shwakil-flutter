@@ -192,7 +192,9 @@ class QuickLogoutAction extends StatelessWidget {
       }
     }
 
-    Navigator.of(context).pushNamedAndRemoveUntil(
+    final navigator =
+        AppAlertService.navigatorKey.currentState ?? Navigator.maybeOf(context);
+    navigator?.pushNamedAndRemoveUntil(
       canUseTrustedUnlock ? '/unlock' : '/login',
       (route) => false,
     );

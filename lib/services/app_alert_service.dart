@@ -210,21 +210,10 @@ class AppAlertService {
       final cleanStackTrace = stackTrace == null || stackTrace.trim().isEmpty
           ? ''
           : TelemetryRedactionService.scrub(stackTrace, maxLength: 8000);
-      final errorKind = _safeTelemetryValue(
-        'errorKind',
-        extraContext?['errorKind'],
-      );
-      final exceptionClass = _safeTelemetryValue(
-        'exceptionClass',
-        extraContext?['exceptionClass'],
-      );
       if (!_shouldReportCrash(
-        title: cleanTitle,
         message: cleanMessage,
         stackTrace: cleanStackTrace,
         route: route,
-        errorKind: errorKind,
-        exceptionClass: exceptionClass,
       )) {
         return;
       }
@@ -295,20 +284,17 @@ class AppAlertService {
   }
 
   static bool _shouldReportCrash({
-    required String title,
     required String message,
     required String stackTrace,
     required String? route,
-    required String? errorKind,
-    required String? exceptionClass,
   }) {
+    // A single web exception can be surfaced by FlutterError,
+    // PlatformDispatcher and the guarded zone with different titles/kinds.
+    // The stack (or message when unavailable) plus the route identifies the
+    // actual failure without treating those delivery paths as distinct crashes.
     final fingerprint = [
-      title,
-      message,
-      stackTrace,
+      stackTrace.isNotEmpty ? stackTrace : message,
       route?.trim() ?? '',
-      errorKind?.trim() ?? '',
-      exceptionClass?.trim() ?? '',
     ].join('\u001f');
     final now = DateTime.now();
     _recentCrashFingerprints.removeWhere(
