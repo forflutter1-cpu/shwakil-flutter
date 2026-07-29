@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -18,6 +19,7 @@ class StoreManagementService {
   static final AesGcm _cipher = AesGcm.with256bits();
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
   static const Uuid _uuid = Uuid();
+  static final Map<String, Future<void>> _userLocks = {};
 
   Future<Map<String, dynamic>> getSnapshot(String userId) async {
     final prefs = await SharedPreferences.getInstance();
@@ -35,7 +37,7 @@ class StoreManagementService {
   Future<void> removePendingOperation({
     required String userId,
     required String opId,
-  }) async {
+  }) => _serialized(userId, () async {
     final prefs = await SharedPreferences.getInstance();
     final key = '$_queueKeyPrefix$userId';
     final queue = await _decodeList(prefs.getString(key));
@@ -48,15 +50,21 @@ class StoreManagementService {
       await prefs.setString(key, await _encode(next));
     }
     await _restoreConfirmedWithPending(userId, next);
-  }
+  });
 
-  Future<void> clearPendingOperations(String userId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('$_queueKeyPrefix$userId');
-    await _restoreConfirmedWithPending(userId, const []);
-  }
+  Future<void> clearPendingOperations(String userId) =>
+      _serialized(userId, () async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('$_queueKeyPrefix$userId');
+        await _restoreConfirmedWithPending(userId, const []);
+      });
 
   Future<Map<String, dynamic>> refresh({
+    required String userId,
+    required ApiService api,
+  }) => _serialized(userId, () => _refreshUnlocked(userId: userId, api: api));
+
+  Future<Map<String, dynamic>> _refreshUnlocked({
     required String userId,
     required ApiService api,
   }) async {
@@ -77,12 +85,12 @@ class StoreManagementService {
   Future<void> cacheMaintenanceSnapshot(
     String userId,
     Map<String, dynamic> data,
-  ) async {
+  ) => _serialized(userId, () async {
     final snapshot = await getSnapshot(userId);
     await _storeSnapshot(userId, {...snapshot, 'maintenance': data});
     final confirmed = await _getConfirmedSnapshot(userId);
     await _storeConfirmedSnapshot(userId, {...confirmed, 'maintenance': data});
-  }
+  });
 
   Future<void> queueMaintenance({
     required String userId,
@@ -159,10 +167,16 @@ class StoreManagementService {
   Future<Map<String, dynamic>> syncPending({
     required String userId,
     required ApiService api,
+  }) =>
+      _serialized(userId, () => _syncPendingUnlocked(userId: userId, api: api));
+
+  Future<Map<String, dynamic>> _syncPendingUnlocked({
+    required String userId,
+    required ApiService api,
   }) async {
     final operations = await getPendingOperations(userId);
     if (operations.isEmpty) {
-      return refresh(userId: userId, api: api);
+      return _refreshUnlocked(userId: userId, api: api);
     }
 
     final remaining = operations
@@ -585,11 +599,26 @@ class StoreManagementService {
   Future<void> _enqueueAndApply(
     String userId,
     Map<String, dynamic> operation,
-  ) async {
+  ) => _serialized(userId, () async {
     final snapshot = await getSnapshot(userId);
     final next = _applyLocalOperation(snapshot, operation);
     await _enqueue(userId, operation);
     await _storeSnapshot(userId, next);
+  });
+
+  Future<T> _serialized<T>(String userId, Future<T> Function() action) async {
+    final previous = _userLocks[userId] ?? Future<void>.value();
+    final completer = Completer<void>();
+    _userLocks[userId] = completer.future;
+    try {
+      await previous.catchError((_) {});
+      return await action();
+    } finally {
+      completer.complete();
+      if (identical(_userLocks[userId], completer.future)) {
+        _userLocks.remove(userId);
+      }
+    }
   }
 
   Future<void> _validateStoreStock({
@@ -769,6 +798,20 @@ class StoreManagementService {
               .firstOrNull;
           final quantity = (op['quantity'] as num?)?.toDouble() ?? 0;
           final price = (op['unitPrice'] as num?)?.toDouble() ?? 0;
+          final available =
+              (_list(product?['stocks'])
+                          .where(
+                            (stock) =>
+                                stock['warehouseId']?.toString() ==
+                                op['warehouseId']?.toString(),
+                          )
+                          .firstOrNull?['quantity']
+                      as num?)
+                  ?.toDouble() ??
+              0;
+          if (quantity <= 0 || quantity > available + 0.000001) {
+            throw StateError('الكمية المطلوبة من قطعة الصيانة غير متوفرة.');
+          }
           parts.add({
             'id': 'local:${op['clientRef']}',
             'clientRef': op['clientRef'],
@@ -1079,13 +1122,22 @@ class StoreManagementService {
       subtotal += lineTotal;
       costTotal += itemCost;
       final oldStock = (product['stockQuantity'] as num?)?.toDouble() ?? 0;
-      product['stockQuantity'] = _decimal(
-        oldStock + (invoiceType == 'purchase' ? baseQuantity : -baseQuantity),
-        4,
-      );
       final warehouseStocks = _list(product['warehouseStocks']);
       final stockIndex = warehouseStocks.indexWhere(
         (stock) => stock['warehouseId']?.toString() == warehouseId,
+      );
+      final warehouseAvailable = stockIndex >= 0
+          ? (warehouseStocks[stockIndex]['quantity'] as num?)?.toDouble() ?? 0
+          : 0;
+      if (invoiceType == 'sale' &&
+          baseQuantity > warehouseAvailable + 0.000001) {
+        throw StateError(
+          'الكمية المطلوبة من ${product['name'] ?? 'الصنف'} غير متوفرة في المخزن المحدد.',
+        );
+      }
+      product['stockQuantity'] = _decimal(
+        oldStock + (invoiceType == 'purchase' ? baseQuantity : -baseQuantity),
+        4,
       );
       if (stockIndex >= 0) {
         final stock = warehouseStocks[stockIndex];
@@ -1225,6 +1277,16 @@ class StoreManagementService {
           ((raw['quantity'] as num?)?.toDouble() ?? 0) *
           ((unit['factorToBase'] as num?)?.toDouble() ?? 1);
       final stocks = _list(product['warehouseStocks']);
+      final sourceStock = stocks
+          .where((stock) => stock['warehouseId']?.toString() == fromId)
+          .firstOrNull;
+      final sourceAvailable =
+          (sourceStock?['quantity'] as num?)?.toDouble() ?? 0;
+      if (quantity <= 0 || quantity > sourceAvailable + 0.000001) {
+        throw StateError(
+          'الكمية المطلوبة من ${product['name'] ?? 'الصنف'} غير متوفرة للتحويل.',
+        );
+      }
       for (final entry in [
         [fromId, -quantity],
         [toId, quantity],

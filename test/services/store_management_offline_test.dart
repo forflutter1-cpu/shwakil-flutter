@@ -291,6 +291,51 @@ void main() {
     expect((snapshot['products'] as List).first['stockQuantity'], 5.0);
     expect(snapshot['invoices'], isEmpty);
   });
+
+  test(
+    'simultaneous offline sales are serialized without overselling',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'concurrent-sales-user';
+      await service.queueProduct(
+        userId: userId,
+        name: 'تهيئة',
+        baseUnit: 'piece',
+        minimumStock: 0,
+        salePrice: 1,
+        units: const [],
+      );
+      await service.syncPending(userId: userId, api: _StockSnapshotApi());
+      Future<bool> sell() async {
+        try {
+          await service.queueInvoice(
+            userId: userId,
+            invoiceType: 'sale',
+            warehouseId: 'warehouse-1',
+            paidAmount: 0,
+            paymentMethod: 'cash',
+            items: const [
+              {
+                'productId': 'product-1',
+                'productUnitId': 'unit-1',
+                'quantity': 3.0,
+                'unitPrice': 10.0,
+              },
+            ],
+          );
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      final results = await Future.wait([sell(), sell()]);
+      expect(results.where((result) => result), hasLength(1));
+      final snapshot = await service.getSnapshot(userId);
+      expect((snapshot['products'] as List).first['stockQuantity'], 2.0);
+      expect(await service.getPendingOperations(userId), hasLength(1));
+    },
+  );
 }
 
 class _PartialSyncApi extends ApiService {
