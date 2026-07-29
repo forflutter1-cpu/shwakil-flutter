@@ -101,6 +101,20 @@ class StoreManagementService {
     String? partClientRef,
     Map<String, dynamic> data = const {},
   }) async {
+    if (action == 'create') {
+      for (final field in const [
+        'customerName',
+        'customerPhone',
+        'deviceType',
+        'reportedIssue',
+        'deviceCondition',
+        'location',
+      ]) {
+        if (data[field]?.toString().trim().isNotEmpty != true) {
+          throw StateError('جميع حقول استلام الصيانة الإلزامية مطلوبة.');
+        }
+      }
+    }
     final clientRef = data['clientRef']?.toString().trim().isNotEmpty == true
         ? data['clientRef'].toString()
         : _uuid.v4();
@@ -407,6 +421,24 @@ class StoreManagementService {
     bool publicAllowOnlineSale = false,
     double? publicMaxQuantity,
   }) {
+    if (name.trim().isEmpty) {
+      throw StateError('اسم الصنف مطلوب.');
+    }
+    if (baseUnit.trim().isEmpty) {
+      throw StateError('الوحدة الأساسية مطلوبة.');
+    }
+    if (minimumStock < 0 || salePrice < 0) {
+      throw StateError('الرصيد الأدنى والأسعار لا يمكن أن تكون سالبة.');
+    }
+    for (final unit in units) {
+      if (((unit['factorToBase'] as num?)?.toDouble() ?? 0) <= 0) {
+        throw StateError('معامل تحويل الوحدة يجب أن يكون أكبر من صفر.');
+      }
+      if (((unit['salePrice'] as num?)?.toDouble() ?? 0) < 0 ||
+          ((unit['purchasePrice'] as num?)?.toDouble() ?? 0) < 0) {
+        throw StateError('أسعار الوحدة لا يمكن أن تكون سالبة.');
+      }
+    }
     final client = clientRef ?? _uuid.v4();
     final preparedUnits = units.map((unit) {
       return {
@@ -444,6 +476,12 @@ class StoreManagementService {
     String publicOrderMode = 'manual',
     double publicMinOrderTotal = 0,
   }) {
+    if (name.trim().isEmpty) {
+      throw StateError('اسم المحل مطلوب.');
+    }
+    if (!RegExp(r'^[A-Za-z]{3}$').hasMatch(currency.trim())) {
+      throw StateError('رمز العملة يجب أن يتكون من ثلاثة أحرف.');
+    }
     return _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'workspace',
@@ -467,6 +505,12 @@ class StoreManagementService {
     String notes = '',
     String? debtBookCustomerId,
   }) {
+    if (name.trim().isEmpty) {
+      throw StateError('اسم العميل أو المورد مطلوب.');
+    }
+    if (!['customer', 'supplier', 'both'].contains(type)) {
+      throw StateError('نوع الحساب غير صالح.');
+    }
     return _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'party',
@@ -541,15 +585,20 @@ class StoreManagementService {
     required String name,
     String code = '',
     String notes = '',
-  }) => _enqueueAndApply(userId, {
-    'opId': _uuid.v4(),
-    'entity': 'warehouse',
-    'type': 'upsert',
-    'clientRef': _uuid.v4(),
-    'name': name.trim(),
-    'code': code.trim(),
-    'notes': notes.trim(),
-  });
+  }) {
+    if (name.trim().isEmpty) {
+      throw StateError('اسم المخزن مطلوب.');
+    }
+    return _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'warehouse',
+      'type': 'upsert',
+      'clientRef': _uuid.v4(),
+      'name': name.trim(),
+      'code': code.trim(),
+      'notes': notes.trim(),
+    });
+  }
 
   Future<void> queueStockTransfer({
     required String userId,

@@ -604,6 +604,39 @@ void main() {
     );
     expect(await service.getPendingOperations(userId), isEmpty);
   });
+
+  test('required offline master data fields are enforced', () async {
+    final service = StoreManagementService();
+    const userId = 'invalid-master-data-user';
+    expect(
+      () => service.queueProduct(
+        userId: userId,
+        name: ' ',
+        baseUnit: 'piece',
+        minimumStock: 0,
+        salePrice: 0,
+        units: const [],
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => service.queueWarehouse(userId: userId, name: ''),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => service.queueParty(userId: userId, type: 'customer', name: ''),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      service.queueMaintenance(
+        userId: userId,
+        action: 'create',
+        data: const {'customerName': 'عميل'},
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(await service.getPendingOperations(userId), isEmpty);
+  });
 }
 
 class _PartialSyncApi extends ApiService {
