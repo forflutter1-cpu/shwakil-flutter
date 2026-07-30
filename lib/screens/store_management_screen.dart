@@ -54,6 +54,10 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
   List<Map<String, dynamic>> get _warehouses => _list(_snapshot['warehouses']);
   List<Map<String, dynamic>> get _parties => _list(_snapshot['parties']);
   List<Map<String, dynamic>> get _invoices => _list(_snapshot['invoices']);
+  List<Map<String, dynamic>> get _paymentMethods =>
+      _list(_snapshot['paymentMethods']);
+  List<Map<String, dynamic>> get _activePaymentMethods =>
+      _paymentMethods.where((method) => method['isActive'] != false).toList();
   List<Map<String, dynamic>> get _debtBookAccounts =>
       _list(_snapshot['debtBookAccounts']);
   Map<String, dynamic> get _summary => _snapshot['summary'] is Map
@@ -1006,6 +1010,176 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     return result;
   }
 
+  Future<void> _managePaymentMethods() async {
+    final l = context.loc;
+    final methods = _paymentMethods
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+    final removed = <Map<String, dynamic>>[];
+
+    Future<String?> askName(BuildContext dialog, [String value = '']) async {
+      final controller = TextEditingController(text: value);
+      final result = await showDialog<String>(
+        context: dialog,
+        builder: (context) => AlertDialog(
+          title: Text(
+            value.isEmpty
+                ? l.text('إضافة طريقة دفع', 'Add payment method')
+                : l.text('تعديل طريقة الدفع', 'Edit payment method'),
+          ),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 100,
+            decoration: InputDecoration(
+              labelText: l.text('اسم طريقة الدفع', 'Payment method name'),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(l.text('إلغاء', 'Cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: Text(l.text('حفظ', 'Save')),
+            ),
+          ],
+        ),
+      );
+      controller.dispose();
+      return result;
+    }
+
+    final accepted = await _openFullScreenForm(
+      title: l.text('طرق الدفع', 'Payment methods'),
+      actionLabel: l.text('حفظ الترتيب', 'Save order'),
+      canSubmit: () => methods.any((method) => method['isActive'] != false),
+      builder: (dialog, setFormState) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            l.text(
+              'رتّب الطرق التي تظهر للكاشير، وأضف طرقًا خاصة بمتجرك. يجب إبقاء طريقة واحدة فعالة على الأقل.',
+              'Arrange cashier payment methods and add store-specific options. Keep at least one active.',
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              final name = await askName(dialog);
+              if (name == null || name.isEmpty) return;
+              setFormState(
+                () => methods.add({
+                  'id': 'local:${DateTime.now().microsecondsSinceEpoch}',
+                  'clientRef': DateTime.now().microsecondsSinceEpoch.toString(),
+                  'name': name,
+                  'isActive': true,
+                  'isSystem': false,
+                }),
+              );
+            },
+            icon: const Icon(Icons.add_rounded),
+            label: Text(l.text('إضافة طريقة دفع', 'Add payment method')),
+          ),
+          const SizedBox(height: 8),
+          ...methods.asMap().entries.map((entry) {
+            final index = entry.key;
+            final method = entry.value;
+            return Card(
+              child: ListTile(
+                leading: Switch(
+                  value: method['isActive'] != false,
+                  onChanged: (value) =>
+                      setFormState(() => method['isActive'] = value),
+                ),
+                title: Text(method['name']?.toString() ?? ''),
+                subtitle: Text(
+                  method['isActive'] != false
+                      ? l.text('تظهر عند الدفع', 'Shown at checkout')
+                      : l.text('مخفية مؤقتًا', 'Temporarily hidden'),
+                ),
+                trailing: Wrap(
+                  spacing: 0,
+                  children: [
+                    IconButton(
+                      tooltip: l.text('للأعلى', 'Move up'),
+                      onPressed: index == 0
+                          ? null
+                          : () => setFormState(() {
+                              final item = methods.removeAt(index);
+                              methods.insert(index - 1, item);
+                            }),
+                      icon: const Icon(Icons.arrow_upward_rounded),
+                    ),
+                    IconButton(
+                      tooltip: l.text('للأسفل', 'Move down'),
+                      onPressed: index == methods.length - 1
+                          ? null
+                          : () => setFormState(() {
+                              final item = methods.removeAt(index);
+                              methods.insert(index + 1, item);
+                            }),
+                      icon: const Icon(Icons.arrow_downward_rounded),
+                    ),
+                    IconButton(
+                      tooltip: l.text('تعديل', 'Edit'),
+                      onPressed: () async {
+                        final name = await askName(
+                          dialog,
+                          method['name']?.toString() ?? '',
+                        );
+                        if (name != null && name.isNotEmpty) {
+                          setFormState(() => method['name'] = name);
+                        }
+                      },
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      tooltip: l.text('حذف', 'Delete'),
+                      onPressed: methods.length <= 1
+                          ? null
+                          : () => setFormState(() {
+                              removed.add(method);
+                              methods.removeAt(index);
+                            }),
+                      icon: const Icon(Icons.delete_outline_rounded),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+    if (accepted != true) return;
+
+    for (final method in removed) {
+      final id = method['id']?.toString() ?? '';
+      if (id.isNotEmpty && !id.startsWith('local:')) {
+        await _store.queueDeletePaymentMethod(
+          userId: _userId,
+          id: id,
+          clientRef: method['clientRef']?.toString(),
+        );
+      }
+    }
+    for (var index = 0; index < methods.length; index++) {
+      final method = methods[index];
+      final rawId = method['id']?.toString();
+      await _store.queuePaymentMethod(
+        userId: _userId,
+        id: rawId?.startsWith('local:') == true ? null : rawId,
+        clientRef: method['clientRef']?.toString(),
+        name: method['name']?.toString() ?? '',
+        sortOrder: (index + 1) * 10,
+        isActive: method['isActive'] != false,
+      );
+    }
+    await _showLocalThenSync();
+  }
+
   Future<void> _createInvoice({bool quickSale = false}) async {
     if (_products.isEmpty) return;
     String invoiceType = quickSale || _permissions.canCreateStoreSales
@@ -1019,6 +1193,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         )['id']
         ?.toString();
     String paymentStatus = 'paid';
+    String? paymentMethodId = _activePaymentMethods.firstOrNull?['id']
+        ?.toString();
     final paid = TextEditingController(text: '0');
     final discount = TextEditingController(text: '0');
     final lines = <Map<String, dynamic>>[];
@@ -1109,6 +1285,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
       canSubmit: () =>
           lines.isNotEmpty &&
           warehouseId != null &&
+          (paymentStatus == 'debt' || paymentMethodId != null) &&
           !(invoiceType == 'purchase' && partyId == null),
       builder: (context, setDialogState) {
         final allowedParties = _parties.where((party) {
@@ -1467,6 +1644,26 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                 ),
               ),
             ],
+            if (paymentStatus != 'debt') ...[
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: paymentMethodId,
+                decoration: InputDecoration(
+                  labelText: l.text('طريقة الدفع', 'Payment method'),
+                  prefixIcon: const Icon(Icons.payments_rounded),
+                ),
+                items: _activePaymentMethods
+                    .map(
+                      (method) => DropdownMenuItem(
+                        value: method['id']?.toString(),
+                        child: Text(method['name']?.toString() ?? ''),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) =>
+                    setDialogState(() => paymentMethodId = value),
+              ),
+            ],
             const SizedBox(height: 14),
             Align(
               alignment: AlignmentDirectional.centerStart,
@@ -1505,6 +1702,10 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         (warehouse) => warehouse['id']?.toString() == warehouseId,
         orElse: () => const <String, dynamic>{},
       );
+      final selectedPaymentMethod = _activePaymentMethods.firstWhere(
+        (method) => method['id']?.toString() == paymentMethodId,
+        orElse: () => const <String, dynamic>{},
+      );
       await _store.queueInvoice(
         userId: _userId,
         invoiceType: invoiceType,
@@ -1513,7 +1714,11 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         warehouseId: warehouseId,
         warehouseClientRef: selectedWarehouse['clientRef']?.toString(),
         paidAmount: paidAmount,
-        paymentMethod: 'cash',
+        paymentMethod: selectedPaymentMethod['name']?.toString() ?? 'كاش',
+        paymentMethodId: paymentStatus == 'debt' ? null : paymentMethodId,
+        paymentMethodClientRef: paymentStatus == 'debt'
+            ? null
+            : selectedPaymentMethod['clientRef']?.toString(),
         discount: discountValue,
         items: lines
             .map(
@@ -1543,12 +1748,15 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     final due = (invoice['dueAmount'] as num?)?.toDouble() ?? 0;
     if (due <= 0 || !_permissions.canManageStoreDebts) return;
     final amount = TextEditingController(text: due.toStringAsFixed(2));
+    String? paymentMethodId = _activePaymentMethods.firstOrNull?['id']
+        ?.toString();
     final l = context.loc;
     final accepted = await _openFullScreenForm(
       title:
           '${l.text('تسجيل دفعة', 'Record payment')} ${invoice['invoiceNumber']}',
       actionLabel: l.text('حفظ الدفعة', 'Save payment'),
-      canSubmit: () => (double.tryParse(amount.text) ?? 0) > 0,
+      canSubmit: () =>
+          (double.tryParse(amount.text) ?? 0) > 0 && paymentMethodId != null,
       builder: (context, setFormState) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1561,12 +1769,33 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
               helperText: '${l.text('المتبقي', 'Remaining')} ${_money(due)}',
             ),
           ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: paymentMethodId,
+            decoration: InputDecoration(
+              labelText: l.text('طريقة الدفع', 'Payment method'),
+              prefixIcon: const Icon(Icons.payments_rounded),
+            ),
+            items: _activePaymentMethods
+                .map(
+                  (method) => DropdownMenuItem(
+                    value: method['id']?.toString(),
+                    child: Text(method['name']?.toString() ?? ''),
+                  ),
+                )
+                .toList(),
+            onChanged: (value) => setFormState(() => paymentMethodId = value),
+          ),
         ],
       ),
     );
     final value = double.tryParse(amount.text) ?? 0;
     amount.dispose();
     if (accepted == true && value > 0) {
+      final method = _activePaymentMethods.firstWhere(
+        (item) => item['id']?.toString() == paymentMethodId,
+        orElse: () => const <String, dynamic>{},
+      );
       await _store.queuePayment(
         userId: _userId,
         invoiceId: invoice['id']?.toString(),
@@ -1581,6 +1810,9 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             ?.toString(),
         direction: invoice['type'] == 'purchase' ? 'out' : 'in',
         amount: value,
+        method: method['name']?.toString() ?? 'كاش',
+        paymentMethodId: paymentMethodId,
+        paymentMethodClientRef: method['clientRef']?.toString(),
         actorUserId: _userId,
         actorName: _actorName,
       );
@@ -1837,6 +2069,23 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
               ),
               trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 18),
               onTap: () => Navigator.pushNamed(context, '/sub-users'),
+            ),
+          ),
+          const SizedBox(height: 18),
+        ],
+        if (_permissions.canManageStoreInventory) ...[
+          ShwakelCard(
+            child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.payments_rounded)),
+              title: Text(l.text('طرق الدفع', 'Payment methods')),
+              subtitle: Text(
+                l.text(
+                  'إضافة وحذف وترتيب الطرق الظاهرة في الفواتير والصيانة',
+                  'Add, remove and arrange methods used in invoices and maintenance',
+                ),
+              ),
+              trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 18),
+              onTap: _managePaymentMethods,
             ),
           ),
           const SizedBox(height: 18),

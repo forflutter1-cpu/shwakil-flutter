@@ -535,6 +535,8 @@ class StoreManagementService {
     String? warehouseClientRef,
     required double paidAmount,
     required String paymentMethod,
+    String? paymentMethodId,
+    String? paymentMethodClientRef,
     required List<Map<String, dynamic>> items,
     double discount = 0,
     String notes = '',
@@ -571,6 +573,8 @@ class StoreManagementService {
       'warehouseClientRef': ?warehouseClientRef,
       'paidAmount': paidAmount,
       'paymentMethod': paymentMethod,
+      'paymentMethodId': ?paymentMethodId,
+      'paymentMethodClientRef': ?paymentMethodClientRef,
       'discount': discount,
       'notes': notes.trim(),
       'quickSale': quickSale,
@@ -675,6 +679,8 @@ class StoreManagementService {
     required String direction,
     required double amount,
     String method = 'cash',
+    String? paymentMethodId,
+    String? paymentMethodClientRef,
     String notes = '',
     String? actorUserId,
     String? actorName,
@@ -700,10 +706,49 @@ class StoreManagementService {
       'direction': direction,
       'amount': amount,
       'method': method,
+      'paymentMethodId': ?paymentMethodId,
+      'paymentMethodClientRef': ?paymentMethodClientRef,
       'notes': notes.trim(),
       'actorUserId': ?actorUserId,
       'actorName': ?actorName,
       'occurredAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  Future<void> queuePaymentMethod({
+    required String userId,
+    String? id,
+    String? clientRef,
+    required String name,
+    required int sortOrder,
+    required bool isActive,
+  }) {
+    if (name.trim().isEmpty) {
+      throw StateError('اسم طريقة الدفع مطلوب.');
+    }
+    return _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'payment_method',
+      'action': 'upsert',
+      'id': ?id,
+      'clientRef': clientRef ?? _uuid.v4(),
+      'name': name.trim(),
+      'sortOrder': sortOrder,
+      'isActive': isActive,
+    });
+  }
+
+  Future<void> queueDeletePaymentMethod({
+    required String userId,
+    required String id,
+    String? clientRef,
+  }) {
+    return _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'payment_method',
+      'action': 'delete',
+      'id': id,
+      'clientRef': ?clientRef,
     });
   }
 
@@ -833,8 +878,9 @@ class StoreManagementService {
     if (entity == 'workspace') return 0;
     if (entity == 'product') return 1;
     if (entity == 'warehouse') return 2;
-    if (entity == 'party') return 3;
-    if (entity == 'maintenance' && operation['action'] == 'create') return 4;
+    if (entity == 'payment_method') return 3;
+    if (entity == 'party') return 4;
+    if (entity == 'maintenance' && operation['action'] == 'create') return 5;
     if (entity == 'invoice') {
       return operation['invoiceType']?.toString() == 'purchase' ? 5 : 6;
     }
@@ -981,6 +1027,7 @@ class StoreManagementService {
     next['parties'] = _list(next['parties']);
     next['invoices'] = _list(next['invoices']);
     next['payments'] = _list(next['payments']);
+    next['paymentMethods'] = _list(next['paymentMethods']);
     next['debtBookAccounts'] = _list(next['debtBookAccounts']);
 
     switch (operation['entity']?.toString()) {
@@ -995,6 +1042,9 @@ class StoreManagementService {
         break;
       case 'warehouse':
         _applyLocalWarehouse(next, operation);
+        break;
+      case 'payment_method':
+        _applyLocalPaymentMethod(next, operation);
         break;
       case 'invoice':
         _applyLocalInvoice(next, operation);
@@ -1013,6 +1063,44 @@ class StoreManagementService {
     next['summary'] = _summaryFor(next);
     next['syncedAt'] = snapshot['syncedAt'];
     return next;
+  }
+
+  void _applyLocalPaymentMethod(
+    Map<String, dynamic> snapshot,
+    Map<String, dynamic> op,
+  ) {
+    final methods = _list(snapshot['paymentMethods']);
+    final id = op['id']?.toString();
+    final clientRef = op['clientRef']?.toString();
+    final index = methods.indexWhere(
+      (item) =>
+          (id != null && item['id']?.toString() == id) ||
+          (clientRef != null && item['clientRef']?.toString() == clientRef),
+    );
+    if (op['action'] == 'delete') {
+      if (index >= 0) methods.removeAt(index);
+    } else {
+      final value = {
+        if (index >= 0) ...methods[index],
+        'id': id ?? 'local:$clientRef',
+        'clientRef': clientRef,
+        'name': op['name'],
+        'sortOrder': op['sortOrder'] ?? 0,
+        'isActive': op['isActive'] != false,
+        'isSystem': index >= 0 && methods[index]['isSystem'] == true,
+      };
+      if (index >= 0) {
+        methods[index] = value;
+      } else {
+        methods.add(value);
+      }
+    }
+    methods.sort(
+      (a, b) => ((a['sortOrder'] as num?)?.toInt() ?? 0).compareTo(
+        (b['sortOrder'] as num?)?.toInt() ?? 0,
+      ),
+    );
+    snapshot['paymentMethods'] = methods;
   }
 
   void _applyLocalMaintenance(
@@ -1668,6 +1756,10 @@ class StoreManagementService {
           : paidAmount >= total
           ? 'paid'
           : 'partial',
+      'paymentMethodId': operation['paymentMethodId'],
+      'paymentMethodName': paidAmount > 0
+          ? operation['paymentMethod']?.toString() ?? ''
+          : '',
       'subtotal': _money(subtotal),
       'discount': discount,
       'total': total,
@@ -1830,6 +1922,7 @@ class StoreManagementService {
       'invoiceId': invoiceId,
       'partyId': partyId,
       'direction': direction,
+      'paymentMethodId': operation['paymentMethodId'],
       'method': operation['method'] ?? 'cash',
       'amount': amount,
       'reference': operation['reference'] ?? '',

@@ -40,6 +40,9 @@ class _MaintenanceManagementScreenState
   List<Map<String, dynamic>> get _employees => _list(_data['employees']);
   List<Map<String, dynamic>> get _products => _list(_data['products']);
   List<Map<String, dynamic>> get _warehouses => _list(_data['warehouses']);
+  List<Map<String, dynamic>> get _paymentMethods => _list(
+    _data['paymentMethods'],
+  ).where((method) => method['isActive'] != false).toList();
   List<Map<String, dynamic>> get _technicianPerformance =>
       _list(_data['technicianPerformance']);
   Map<String, dynamic> get _summary => _map(_data['summary']);
@@ -1235,7 +1238,87 @@ class _MaintenanceManagementScreenState
   }
 
   Future<void> _finalize(Map<String, dynamic> order) async {
-    await _act(() => _queueMaintenance('finalize', order: order));
+    final paidAmount = (order['paidAmount'] as num?)?.toDouble() ?? 0;
+    String? paymentMethodId = _paymentMethods.firstOrNull?['id']?.toString();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(
+            context.loc.text(
+              'إنشاء فاتورة الصيانة',
+              'Create maintenance invoice',
+            ),
+          ),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  '${context.loc.text('الإجمالي', 'Total')}: ${order['total']}',
+                ),
+                Text('${context.loc.text('المدفوع', 'Paid')}: $paidAmount'),
+                if (paidAmount > 0) ...[
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    initialValue: paymentMethodId,
+                    decoration: InputDecoration(
+                      labelText: context.loc.text(
+                        'طريقة الدفع',
+                        'Payment method',
+                      ),
+                      prefixIcon: const Icon(Icons.payments_rounded),
+                    ),
+                    items: _paymentMethods
+                        .map(
+                          (method) => DropdownMenuItem(
+                            value: method['id']?.toString(),
+                            child: Text(method['name']?.toString() ?? ''),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) =>
+                        setDialogState(() => paymentMethodId = value),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: Text(context.loc.text('إلغاء', 'Cancel')),
+            ),
+            FilledButton(
+              onPressed: paidAmount <= 0 || paymentMethodId != null
+                  ? () => Navigator.pop(dialog, true)
+                  : null,
+              child: Text(context.loc.text('إنشاء الفاتورة', 'Create invoice')),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (accepted != true) return;
+    final method = _paymentMethods.firstWhere(
+      (item) => item['id']?.toString() == paymentMethodId,
+      orElse: () => const <String, dynamic>{},
+    );
+    await _act(
+      () => _queueMaintenance(
+        'finalize',
+        order: order,
+        data: paidAmount > 0
+            ? {
+                'paymentMethodId': paymentMethodId,
+                'paymentMethodClientRef': method['clientRef']?.toString(),
+                'paymentMethod': method['name']?.toString(),
+              }
+            : const {},
+      ),
+    );
   }
 
   Future<void> _removePart(
