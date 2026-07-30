@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/index.dart';
+import '../utils/app_permissions.dart';
 import '../utils/app_theme.dart';
 import '../widgets/app_sidebar.dart';
 import '../widgets/responsive_scaffold_container.dart';
@@ -35,6 +36,7 @@ class _MaintenanceManagementScreenState
   String _actorName = '';
   int _pendingCount = 0;
   bool _offline = false;
+  AppPermissions _appPermissions = AppPermissions.fromUser(null);
 
   List<Map<String, dynamic>> get _orders => _list(_data['orders']);
   List<Map<String, dynamic>> get _employees => _list(_data['employees']);
@@ -52,6 +54,8 @@ class _MaintenanceManagementScreenState
   bool get _canCreateSales => _permissions['canCreateStoreSales'] == true;
   bool get _canViewProfits => _permissions['canViewStoreProfits'] == true;
   bool get _canViewReports => _permissions['canViewStoreReports'] == true;
+  bool get _canOpenEmployees => _appPermissions.canViewSubUsers;
+  bool get _canManageEmployees => _appPermissions.canManageSubUsers;
 
   @override
   void initState() {
@@ -77,6 +81,7 @@ class _MaintenanceManagementScreenState
 
   Future<void> _bootstrap() async {
     final user = await _auth.currentUser();
+    _appPermissions = AppPermissions.fromUser(user);
     _userId = user?['id']?.toString();
     _actorName = user?['fullName']?.toString().trim().isNotEmpty == true
         ? user!['fullName'].toString()
@@ -524,7 +529,20 @@ class _MaintenanceManagementScreenState
             ],
           ),
           const SizedBox(height: 8),
-          Text('${order['customerName']}  •  ${order['customerPhone'] ?? ''}'),
+          Text(
+            order['customerName']?.toString() ?? '',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 3),
+          Row(
+            children: [
+              const Icon(Icons.phone_rounded, size: 16),
+              const SizedBox(width: 5),
+              Text(order['customerPhone']?.toString() ?? ''),
+            ],
+          ),
           Text(
             '${order['brand'] ?? ''} ${order['model'] ?? ''}  •  ${context.loc.text('المكان', 'Location')}: ${order['location']?.toString().isEmpty == false ? order['location'] : '-'}',
           ),
@@ -567,6 +585,7 @@ class _MaintenanceManagementScreenState
         location = TextEditingController(),
         estimate = TextEditingController();
     String? employeeId;
+    bool showAdditional = false;
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialog) => StatefulBuilder(
@@ -593,42 +612,21 @@ class _MaintenanceManagementScreenState
                     ),
                     const SizedBox(height: 12),
                     _field(
-                      customer,
-                      context.loc.text('اسم العميل *', 'Customer name *'),
+                      phone,
+                      context.loc.text('رقم الجوال *', 'Mobile number *'),
+                      type: TextInputType.phone,
                       required: true,
+                      autofocus: true,
                     ),
                     _field(
-                      phone,
-                      context.loc.text('رقم الهاتف *', 'Phone *'),
-                      type: TextInputType.phone,
+                      customer,
+                      context.loc.text('اسم العميل *', 'Customer name *'),
                       required: true,
                     ),
                     _field(
                       device,
                       context.loc.text('نوع الجهاز *', 'Device type *'),
                       required: true,
-                    ),
-                    if (_canCreateSales)
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _field(
-                              brand,
-                              context.loc.text('الماركة', 'Brand'),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _field(
-                              model,
-                              context.loc.text('الموديل', 'Model'),
-                            ),
-                          ),
-                        ],
-                      ),
-                    _field(
-                      serial,
-                      context.loc.text('الرقم التسلسلي', 'Serial number'),
                     ),
                     _field(
                       issue,
@@ -648,40 +646,146 @@ class _MaintenanceManagementScreenState
                       required: true,
                     ),
                     _field(
-                      accessories,
-                      context.loc.text(
-                        'الملحقات المستلمة',
-                        'Received accessories',
-                      ),
-                    ),
-                    _field(
                       location,
                       context.loc.text('مكان الحفظ *', 'Storage location *'),
                       required: true,
                     ),
-                    DropdownButtonFormField<String>(
-                      initialValue: employeeId,
-                      decoration: InputDecoration(
-                        labelText: context.loc.text(
-                          'الفني المسؤول',
-                          'Assigned technician',
+                    const SizedBox(height: 4),
+                    OutlinedButton.icon(
+                      onPressed: () =>
+                          setLocal(() => showAdditional = !showAdditional),
+                      icon: Icon(
+                        showAdditional
+                            ? Icons.expand_less_rounded
+                            : Icons.add_circle_outline_rounded,
+                      ),
+                      label: Text(
+                        showAdditional
+                            ? context.loc.text(
+                                'إخفاء البيانات الإضافية',
+                                'Hide additional details',
+                              )
+                            : context.loc.text(
+                                'إضافة بيانات أخرى (اختياري)',
+                                'Add more details (optional)',
+                              ),
+                      ),
+                    ),
+                    if (showAdditional) ...[
+                      const SizedBox(height: 12),
+                      if (_canCreateSales)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _field(
+                                brand,
+                                context.loc.text('الماركة', 'Brand'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _field(
+                                model,
+                                context.loc.text('الموديل', 'Model'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      _field(
+                        serial,
+                        context.loc.text('الرقم التسلسلي', 'Serial number'),
+                      ),
+                      _field(
+                        accessories,
+                        context.loc.text(
+                          'الملحقات المستلمة',
+                          'Received accessories',
                         ),
                       ),
-                      items: _employees
-                          .map(
-                            (e) => DropdownMenuItem(
-                              value: e['id']?.toString(),
-                              child: Text(e['name']?.toString() ?? ''),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: DropdownButtonFormField<String>(
+                              initialValue: employeeId,
+                              decoration: InputDecoration(
+                                labelText: context.loc.text(
+                                  'الفني أو المسؤول',
+                                  'Technician or assignee',
+                                ),
+                              ),
+                              items: _employees
+                                  .map(
+                                    (employee) => DropdownMenuItem(
+                                      value: employee['id']?.toString(),
+                                      child: Text(
+                                        employee['phone']
+                                                    ?.toString()
+                                                    .trim()
+                                                    .isNotEmpty ==
+                                                true
+                                            ? '${employee['name']} • ${employee['phone']}'
+                                            : employee['name']?.toString() ??
+                                                  '',
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (value) =>
+                                  setLocal(() => employeeId = value),
                             ),
-                          )
-                          .toList(),
-                      onChanged: (v) => setLocal(() => employeeId = v),
-                    ),
-                    _field(
-                      estimate,
-                      context.loc.text('التكلفة التقديرية', 'Estimated cost'),
-                      type: TextInputType.number,
-                    ),
+                          ),
+                          if (_canOpenEmployees) ...[
+                            const SizedBox(width: 8),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: IconButton.filledTonal(
+                                tooltip: _canManageEmployees
+                                    ? context.loc.text(
+                                        'إضافة فني أو مسؤول',
+                                        'Add technician or assignee',
+                                      )
+                                    : context.loc.text(
+                                        'عرض الموظفين',
+                                        'View employees',
+                                      ),
+                                onPressed: () async {
+                                  await Navigator.of(
+                                    dialog,
+                                  ).pushNamed('/sub-users');
+                                  if (!mounted) return;
+                                  await _load();
+                                  if (dialog.mounted) setLocal(() {});
+                                },
+                                icon: Icon(
+                                  _canManageEmployees
+                                      ? Icons.person_add_alt_1_rounded
+                                      : Icons.people_outline_rounded,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (_canOpenEmployees)
+                        Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: Text(
+                            context.loc.text(
+                              'يُضاف الفني أو المسؤول من حسابات الموظفين، ثم يظهر هنا مباشرة بعد العودة.',
+                              'Add technicians or assignees from employee accounts; they appear here after returning.',
+                            ),
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      const SizedBox(height: 4),
+                      _field(
+                        estimate,
+                        context.loc.text('التكلفة التقديرية', 'Estimated cost'),
+                        type: TextInputType.number,
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1494,12 +1598,14 @@ class _MaintenanceManagementScreenState
     int lines = 1,
     TextInputType? type,
     bool required = false,
+    bool autofocus = false,
   }) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
     child: TextFormField(
       controller: c,
       maxLines: lines,
       keyboardType: type,
+      autofocus: autofocus,
       decoration: InputDecoration(labelText: label),
       validator: required
           ? (value) => value == null || value.trim().isEmpty

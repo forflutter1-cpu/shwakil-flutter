@@ -176,6 +176,9 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       }
       _permissions['canAccessStoreManagement'] = true;
       _permissions['canCreateStoreSales'] = true;
+      if (role == 'technician') {
+        _permissions['canManageStoreInventory'] = true;
+      }
       if (role == 'supervisor') {
         _permissions['canManageStoreInventory'] = true;
         _permissions['canCreateStorePurchases'] = true;
@@ -960,6 +963,13 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
                   context.loc.text('كاشير - بيع فقط', 'Cashier - sales only'),
                 ),
                 onPressed: () => _applyStoreRole('cashier'),
+              ),
+              ActionChip(
+                avatar: const Icon(Icons.build_rounded, size: 18),
+                label: Text(
+                  context.loc.text('فني صيانة', 'Maintenance technician'),
+                ),
+                onPressed: () => _applyStoreRole('technician'),
               ),
               ActionChip(
                 avatar: const Icon(Icons.supervisor_account_rounded, size: 18),
