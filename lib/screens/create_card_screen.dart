@@ -156,13 +156,10 @@ class _CreateCardScreenState extends State<CreateCardScreen> {
         return;
       }
       final permissions = AppPermissions.fromUser(user);
-      final isTrialMode =
-          (user?['transferVerificationStatus']?.toString() ?? 'unverified') !=
-          'approved';
       setState(() {
         _user = user;
         _feeSettings = feeSettings;
-        _isAuthorized = permissions.canIssueCards || isTrialMode;
+        _isAuthorized = permissions.canIssueCards;
         final accountName = UserDisplayName.fromMap(
           user,
           fallback: l.tr('screens_create_card_screen.001'),
@@ -191,15 +188,7 @@ class _CreateCardScreenState extends State<CreateCardScreen> {
           _qtyC.text = '1';
           _currentStep = 1;
         }
-        if (isTrialMode) {
-          _visibilityScope = 'restricted';
-          if ((_qtyC.text.trim()).isEmpty ||
-              (int.tryParse(_qtyC.text.trim()) ?? 0) % _cardsPerA4Page == 0) {
-            final minQuantity =
-                (user?['cardOperationMinQuantity'] as num?)?.toInt() ?? 1;
-            _qtyC.text = '${minQuantity < 1 ? 1 : minQuantity}';
-          }
-        } else if (!_isBalanceCard) {
+        if (!_isBalanceCard) {
           _visibilityScope = 'restricted';
         }
         _isLoadingUser = false;
@@ -329,10 +318,7 @@ class _CreateCardScreenState extends State<CreateCardScreen> {
       _isQueueCard ||
       _isSubscriptionCard ||
       _isAttendanceCard;
-  bool get _isTrialMode =>
-      (_user?['transferVerificationStatus']?.toString() ?? 'unverified') !=
-          'approved' &&
-      (_cardType.trim().isEmpty || _isBalanceCard);
+  bool get _isTrialMode => false;
   int get _minimumCardQuantity {
     if (_hasSelectedCardType && !_isBalanceCard) {
       return 1;
