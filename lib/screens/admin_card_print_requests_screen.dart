@@ -1143,6 +1143,7 @@ class _AdminCardPrintRequestsScreenState
     final l = context.loc;
     final status = request['status']?.toString() ?? 'pending_review';
     final busy = _busyId == request['id']?.toString();
+    final cardsReady = _extractCardsFromRequest(request).isNotEmpty;
 
     final chargedIssueCostAmount =
         (request['chargedIssueCostAmount'] as num?)?.toDouble() ?? 0;
@@ -1310,14 +1311,18 @@ class _AdminCardPrintRequestsScreenState
               runSpacing: 10,
               children: [
                 OutlinedButton.icon(
-                  onPressed: busy ? null : () => _printRequestCards(request),
+                  onPressed: busy || !cardsReady
+                      ? null
+                      : () => _printRequestCards(request),
                   icon: const Icon(Icons.print_rounded),
                   label: Text(
                     l.tr('screens_admin_card_print_requests_screen.print_now'),
                   ),
                 ),
                 OutlinedButton.icon(
-                  onPressed: busy ? null : () => _exportRequestPdf(request),
+                  onPressed: busy || !cardsReady
+                      ? null
+                      : () => _exportRequestPdf(request),
                   icon: const Icon(Icons.picture_as_pdf_rounded),
                   label: Text(
                     l.tr('screens_admin_card_print_requests_screen.export_pdf'),
@@ -1344,13 +1349,27 @@ class _AdminCardPrintRequestsScreenState
                     busy,
                     () => _handleAction(request, 'reject'),
                   ),
-                if (status == 'approved' ||
-                    status == 'printing' ||
-                    status == 'ready')
+                if (!cardsReady &&
+                    (status == 'approved' ||
+                        status == 'printing' ||
+                        status == 'ready'))
                   _actionButton(
                     l.tr('screens_admin_card_print_requests_screen.027'),
                     busy,
                     () => _handleAction(request, 'complete'),
+                  ),
+                if (!cardsReady && status == 'pending_review')
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    child: Text(
+                      l.tr(
+                        'screens_admin_card_print_requests_screen.prepare_after_approval_hint',
+                      ),
+                      style: AppTheme.bodyText.copyWith(
+                        fontSize: 13,
+                        color: AppTheme.textSecondary,
+                      ),
+                    ),
                   ),
               ],
             ),

@@ -487,7 +487,9 @@ const Map<String, String> appStringsEn = {
   'screens_admin_card_print_requests_screen.024': 'Reject',
   'screens_admin_card_print_requests_screen.025': 'Start printing',
   'screens_admin_card_print_requests_screen.026': 'Ready for delivery',
-  'screens_admin_card_print_requests_screen.027': 'Complete request',
+  'screens_admin_card_print_requests_screen.027': 'Prepare cards for printing',
+  'screens_admin_card_print_requests_screen.prepare_after_approval_hint':
+      'Approve the request first, then prepare its cards to enable printing and PDF export.',
   'screens_admin_card_print_requests_screen.028': 'Processing...',
   'screens_admin_customers_screen.001': 'Could not load customers',
   'screens_admin_customers_screen.002': 'Missing data',

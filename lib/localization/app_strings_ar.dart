@@ -189,7 +189,8 @@ const Map<String, String> appStringsAr = {
   'permission_catalog.label.canManageLocations': 'إدارة الفروع والمواقع',
   'permission_catalog.label.canManageSystemSettings': 'إدارة إعدادات النظام',
   'permission_catalog.label.canManageDebtBook': 'إدارة دفتر الديون',
-  'permission_catalog.label.canAccessStoreManagement': 'الدخول إلى إدارة المخزون',
+  'permission_catalog.label.canAccessStoreManagement':
+      'الدخول إلى إدارة المخزون',
   'permission_catalog.label.canManageStoreInventory':
       'إدارة أصناف ومخزون المحل',
   'permission_catalog.label.canCreateStoreSales': 'إنشاء فواتير البيع',
@@ -476,7 +477,9 @@ const Map<String, String> appStringsAr = {
   'screens_admin_card_print_requests_screen.024': 'رفض',
   'screens_admin_card_print_requests_screen.025': 'بدء الطباعة',
   'screens_admin_card_print_requests_screen.026': 'جاهز للتسليم',
-  'screens_admin_card_print_requests_screen.027': 'إكمال الطلب',
+  'screens_admin_card_print_requests_screen.027': 'إعداد البطاقات للطباعة',
+  'screens_admin_card_print_requests_screen.prepare_after_approval_hint':
+      'اعتمد الطلب أولًا، ثم استخدم زر إعداد البطاقات للطباعة لتفعيل الطباعة وتصدير PDF.',
   'screens_admin_card_print_requests_screen.028': 'جارٍ المعالجة...',
   'screens_admin_customers_screen.001': 'تعذر تحميل العملاء',
   'screens_admin_customers_screen.002': 'بيانات ناقصة',
