@@ -1279,7 +1279,10 @@ class ApiService {
       'status': status,
       'page': page.toString(),
       'perPage': perPage.toString(),
-      'compact': 'true',
+      // Printing and PDF export require the server-side card snapshot.  The
+      // admin print screen deliberately requests the complete rows so a
+      // completed order remains printable after a refresh.
+      'compact': 'false',
     };
     if (query.trim().isNotEmpty) {
       params['q'] = query.trim();
