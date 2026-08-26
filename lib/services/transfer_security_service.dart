@@ -49,23 +49,9 @@ class TransferSecurityService {
       return const TransferSecurityResult(isVerified: false);
     }
 
-    if (hasPin) {
-      final pinResult = await _confirmWithPin(
-        context,
-        canUseBiometrics: canUseBiometrics,
-      );
-      if (!context.mounted) {
-        return const TransferSecurityResult(isVerified: false);
-      }
-      if (pinResult.isVerified && requireOtpAfterLocalAuth) {
-        return _confirmWithOtp(
-          context,
-          introText: context.loc.tr('services_transfer_security_service.002'),
-        );
-      }
-      return pinResult;
-    }
-
+    // Prefer the OS biometric prompt whenever it is enabled and available.
+    // If the user cancels/fails it, continue with the configured PIN (when
+    // present) before considering the SMS/OTP fallback.
     if (canUseBiometrics) {
       final biometricOk =
           await LocalSecurityService.authenticateWithBiometrics();
@@ -78,6 +64,35 @@ class TransferSecurityService {
           method: 'biometric',
         );
       }
+      if (!context.mounted) {
+        return const TransferSecurityResult(isVerified: false);
+      }
+    }
+
+    if (hasPin) {
+      final pinResult = await _confirmWithPin(
+        context,
+        // Biometrics have already been attempted above.  After cancellation,
+        // show the PIN path directly instead of prompting for the fingerprint
+        // a second time from inside the PIN dialog.
+        canUseBiometrics: false,
+      );
+      if (!context.mounted) {
+        return const TransferSecurityResult(isVerified: false);
+      }
+      // A successful biometric prompt is already a second, OS-backed local
+      // factor.  It must not fall through to the OTP/SMS step (the SMS
+      // gateway may be unavailable).  Keep the optional extra OTP step only
+      // for confirmations that were actually completed with the account PIN.
+      if (pinResult.isVerified &&
+          requireOtpAfterLocalAuth &&
+          pinResult.method != 'biometric') {
+        return _confirmWithOtp(
+          context,
+          introText: context.loc.tr('services_transfer_security_service.002'),
+        );
+      }
+      return pinResult;
     }
 
     if (!context.mounted) {
