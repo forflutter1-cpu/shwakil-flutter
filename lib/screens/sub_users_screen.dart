@@ -190,6 +190,18 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
     if (!_canManageSubUsers) {
       return;
     }
+    final username = _usernameController.text.trim().toLowerCase();
+    if (_editing == null && !RegExp(r'^[a-z0-9]{3,64}$').hasMatch(username)) {
+      AppAlertService.showError(
+        context,
+        title: context.loc.tr('screens_admin_customers_screen.002'),
+        message: context.loc.text(
+          'اسم المستخدم يجب أن يتكون من 3 إلى 64 حرفًا إنجليزيًا أو رقمًا.',
+          'Username must be 3 to 64 English letters or numbers.',
+        ),
+      );
+      return;
+    }
     if (_usernameController.text.trim().isEmpty ||
         (_editing == null && _passwordController.text.trim().isEmpty)) {
       AppAlertService.showError(
@@ -581,6 +593,7 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
           TextField(
             controller: _usernameController,
             enabled: _editing == null,
+            maxLength: 64,
             textInputAction: TextInputAction.next,
             decoration: InputDecoration(
               labelText: context.loc.tr('screens_admin_customers_screen.006'),
