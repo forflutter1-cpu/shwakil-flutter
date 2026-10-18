@@ -188,6 +188,8 @@ final Map<String, WidgetBuilder> _appRoutes = {
   '/withdrawal-requests': (context) => const WithdrawalRequestsScreen(),
   '/topup-requests': (context) => const TopupRequestsScreen(),
   '/external-transfers': (context) => const ExternalTransferFollowupsScreen(),
+  '/external-transfer-accounting': (context) =>
+      const ExternalTransferAccountingScreen(),
   '/usage-policy': (context) => const UsagePolicyScreen(),
   '/contact-us': (context) => const ContactUsScreen(),
   '/supported-locations': (context) => const SupportedLocationsScreen(),
@@ -309,6 +311,7 @@ bool _routeAllowedForUser(String routeName, Map<String, dynamic>? user) {
     '/topup-requests' =>
       permissions.canReviewTopups || permissions.canFinanceTopup,
     '/external-transfers' => permissions.canViewExternalTransfers,
+    '/external-transfer-accounting' => permissions.isPrimaryTrader,
     '/security-settings' => permissions.canViewSecuritySettings,
     '/account-settings' => permissions.canViewAccountSettings,
     '/account-verification' => permissions.canRequestVerification,

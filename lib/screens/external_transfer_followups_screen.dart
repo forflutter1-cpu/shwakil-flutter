@@ -141,6 +141,8 @@ class _ExternalTransferFollowupsScreenState
               'delivery_status': 'pending',
               'reviewed': false,
               'created_by_user_id': userId,
+              'assigned_user_id': payload['assignedUserId'] ?? userId,
+              'assigned_to_name': payload['assignedToName'] ?? '',
               'created_by_name': user?['name'] ?? user?['username'] ?? 'أنا',
               'created_at': queuedAt,
               'offline_pending': true,
@@ -165,7 +167,10 @@ class _ExternalTransferFollowupsScreenState
             }
             if (_status != 'all' && _status != 'pending') return false;
             if (_reviewed == '1') return false;
-            if (_employeeId != 'all' && _employeeId != userId) return false;
+            if (_employeeId != 'all' &&
+                '${row['assigned_user_id'] ?? userId}' != _employeeId) {
+              return false;
+            }
             return true;
           })
           .toList();
@@ -386,7 +391,10 @@ class _ExternalTransferFollowupsScreenState
   Future<void> _add() async {
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => const _ExternalTransferDialog(),
+      builder: (_) => _ExternalTransferDialog(
+        employees: _employees,
+        defaultAssigneeId: _currentUserId,
+      ),
     );
     if (result == null) return;
     try {
@@ -438,7 +446,12 @@ class _ExternalTransferFollowupsScreenState
     }
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => _ExternalTransferDialog(initial: row),
+      builder: (_) => _ExternalTransferDialog(
+        initial: row,
+        employees: _employees,
+        canChooseAssignee: _canManage,
+        defaultAssigneeId: _currentUserId,
+      ),
     );
     if (result == null) return;
     try {
@@ -863,8 +876,10 @@ class _ExternalTransferFollowupsScreenState
     final notes = RegExp(r'^[\s•·\-.,،؛:]+$').hasMatch(rawNotes)
         ? ''
         : rawNotes;
+    final assigned = row['assigned_to_name']?.toString().trim() ?? '';
     final attribution = [
-      if (creator.isNotEmpty) 'بواسطة: $creator',
+      if (assigned.isNotEmpty) 'لـ: $assigned',
+      if (creator.isNotEmpty) 'أضافها: $creator',
       if (notes.isNotEmpty) notes,
     ].join(' • ');
     return Padding(
@@ -1179,7 +1194,16 @@ class _ExternalAppNotificationSettingsDialogState
 
 class _ExternalTransferDialog extends StatefulWidget {
   final Map<String, dynamic>? initial;
-  const _ExternalTransferDialog({this.initial});
+  final List<Map<String, dynamic>> employees;
+  final bool canChooseAssignee;
+  final String? defaultAssigneeId;
+
+  const _ExternalTransferDialog({
+    this.initial,
+    this.employees = const [],
+    this.canChooseAssignee = true,
+    this.defaultAssigneeId,
+  });
   @override
   State<_ExternalTransferDialog> createState() =>
       _ExternalTransferDialogState();
@@ -1193,11 +1217,22 @@ class _ExternalTransferDialogState extends State<_ExternalTransferDialog> {
   final account = TextEditingController();
   final notes = TextEditingController();
   String type = 'bank';
+  int? assignedUserId;
 
   @override
   void initState() {
     super.initState();
     final row = widget.initial;
+    assignedUserId = int.tryParse(
+      '${row?['assigned_user_id'] ?? widget.defaultAssigneeId ?? ''}',
+    );
+    if (!widget.employees.any(
+      (employee) => '${employee['id']}' == '$assignedUserId',
+    )) {
+      assignedUserId = widget.employees.isEmpty
+          ? null
+          : int.tryParse('${widget.employees.first['id']}');
+    }
     if (row != null) {
       name.text = '${row['beneficiary_name'] ?? ''}';
       mobile.text = '${row['beneficiary_mobile'] ?? ''}';
@@ -1243,6 +1278,25 @@ class _ExternalTransferDialogState extends State<_ExternalTransferDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (widget.employees.length > 1 &&
+                  (widget.canChooseAssignee || widget.initial == null)) ...[
+                DropdownButtonFormField<int>(
+                  initialValue: assignedUserId,
+                  decoration: const InputDecoration(
+                    labelText: 'تُسجل على حساب',
+                  ),
+                  items: widget.employees
+                      .map(
+                        (employee) => DropdownMenuItem<int>(
+                          value: int.tryParse('${employee['id']}'),
+                          child: Text(employee['name']?.toString() ?? 'تابع'),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) => setState(() => assignedUserId = value),
+                ),
+                const SizedBox(height: 10),
+              ],
               row([
                 field(
                   TextField(
@@ -1267,8 +1321,15 @@ class _ExternalTransferDialogState extends State<_ExternalTransferDialog> {
                 field(
                   TextField(
                     controller: amount,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: 'القيمة *'),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      signed: true,
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'القيمة *',
+                      helperText:
+                          'أدخل قيمة سالبة لعكس الحركة وخصمها من الإجمالي.',
+                    ),
                   ),
                 ),
                 gap(),
@@ -1333,13 +1394,20 @@ class _ExternalTransferDialogState extends State<_ExternalTransferDialog> {
             final parsedAmount = double.tryParse(amount.text);
             if (name.text.trim().isEmpty ||
                 mobile.text.trim().isEmpty ||
-                parsedAmount == null) {
+                parsedAmount == null ||
+                parsedAmount == 0 ||
+                assignedUserId == null) {
               return;
             }
             Navigator.pop(context, {
               'beneficiaryName': name.text.trim(),
               'beneficiaryMobile': mobile.text.trim(),
               'amount': parsedAmount,
+              'assignedUserId': assignedUserId,
+              'assignedToName': widget.employees
+                  .where((employee) => '${employee['id']}' == '$assignedUserId')
+                  .map((employee) => employee['name']?.toString() ?? '')
+                  .firstWhere((name) => name.isNotEmpty, orElse: () => ''),
               'destinationType': type,
               'destinationName': destination.text.trim(),
               'destinationAccount': account.text.trim(),

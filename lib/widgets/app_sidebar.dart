@@ -327,6 +327,13 @@ class _AppSidebarState extends State<AppSidebar> {
                         ),
                         routeName: '/external-transfers',
                       ),
+                    if (!isOfflineMode && permissions.isPrimaryTrader)
+                      _buildItem(
+                        context,
+                        icon: Icons.price_check_rounded,
+                        title: 'تصفية الحسابات',
+                        routeName: '/external-transfer-accounting',
+                      ),
                   ],
                 ),
                 if (!isOfflineMode) ...[

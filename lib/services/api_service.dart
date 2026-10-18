@@ -785,7 +785,9 @@ class ApiService {
     if (status != null && status.trim().isNotEmpty && status.trim() != 'all') {
       params['status'] = status.trim();
     }
-    if (accountingStatus != null && accountingStatus.trim().isNotEmpty && accountingStatus.trim() != 'all') {
+    if (accountingStatus != null &&
+        accountingStatus.trim().isNotEmpty &&
+        accountingStatus.trim() != 'all') {
       params['accountingStatus'] = accountingStatus.trim();
     }
     if (query.trim().isNotEmpty) {
@@ -4028,14 +4030,23 @@ class ApiService {
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> getTopupRequestsReport({String? from, String? to, String? employeeId, String? period}) async {
+  Future<Map<String, dynamic>> getTopupRequestsReport({
+    String? from,
+    String? to,
+    String? employeeId,
+    String? period,
+  }) async {
     final params = <String, String>{
       if (from != null && from.trim().isNotEmpty) 'from': from.trim(),
       if (to != null && to.trim().isNotEmpty) 'to': to.trim(),
-      if (employeeId != null && employeeId.trim().isNotEmpty) 'employeeId': employeeId.trim(),
+      if (employeeId != null && employeeId.trim().isNotEmpty)
+        'employeeId': employeeId.trim(),
       if (period != null && period.trim().isNotEmpty) 'period': period.trim(),
     };
-    final response = await _client.get(AppConfig.apiUri('admin/topup-requests/report', params), headers: await _headers());
+    final response = await _client.get(
+      AppConfig.apiUri('admin/topup-requests/report', params),
+      headers: await _headers(),
+    );
     return _decodeObject(response);
   }
 
@@ -4059,7 +4070,8 @@ class ApiService {
         'accountingStatus': ?accountingStatus,
         'profitRate': ?profitRate,
         'profitAmount': ?profitAmount,
-        if (accountingNotes.trim().isNotEmpty) 'accountingNotes': accountingNotes.trim(),
+        if (accountingNotes.trim().isNotEmpty)
+          'accountingNotes': accountingNotes.trim(),
       }),
     );
     return _decodeObject(response);
@@ -4073,28 +4085,75 @@ class ApiService {
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> getExternalTransfers({Map<String, String>? filters}) async {
-    final response = await _client.get(AppConfig.apiUri('external-transfers', filters), headers: await _headers());
+  Future<Map<String, dynamic>> getExternalTransfers({
+    Map<String, String>? filters,
+  }) async {
+    final response = await _client.get(
+      AppConfig.apiUri('external-transfers', filters),
+      headers: await _headers(),
+    );
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> getExternalTransfersReport({Map<String, String>? filters}) async {
-    final response = await _client.get(AppConfig.apiUri('external-transfers/report', filters), headers: await _headers());
+  Future<Map<String, dynamic>> getExternalTransfersReport({
+    Map<String, String>? filters,
+  }) async {
+    final response = await _client.get(
+      AppConfig.apiUri('external-transfers/report', filters),
+      headers: await _headers(),
+    );
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> createExternalTransfer(Map<String, dynamic> payload) async {
-    final response = await _client.post(AppConfig.apiUri('external-transfers'), headers: await _headers(), body: jsonEncode(payload));
+  Future<Map<String, dynamic>> getExternalTransferAccounting({
+    Map<String, String>? filters,
+  }) async {
+    final response = await _client.get(
+      AppConfig.apiUri('external-transfers/accounting', filters),
+      headers: await _headers(),
+    );
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> updateExternalTransfer(String id, Map<String, dynamic> payload) async {
-    final response = await _client.put(AppConfig.apiUri('external-transfers/$id'), headers: await _headers(), body: jsonEncode(payload));
+  Future<Map<String, dynamic>> settleExternalTransferAccount(
+    int employeeId,
+  ) async {
+    final response = await _client.post(
+      AppConfig.apiUri('external-transfers/settlements'),
+      headers: await _headers(),
+      body: jsonEncode({'employeeId': employeeId}),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> createExternalTransfer(
+    Map<String, dynamic> payload,
+  ) async {
+    final response = await _client.post(
+      AppConfig.apiUri('external-transfers'),
+      headers: await _headers(),
+      body: jsonEncode(payload),
+    );
+    return _decodeObject(response);
+  }
+
+  Future<Map<String, dynamic>> updateExternalTransfer(
+    String id,
+    Map<String, dynamic> payload,
+  ) async {
+    final response = await _client.put(
+      AppConfig.apiUri('external-transfers/$id'),
+      headers: await _headers(),
+      body: jsonEncode(payload),
+    );
     return _decodeObject(response);
   }
 
   Future<Map<String, dynamic>> deleteExternalTransfer(String id) async {
-    final response = await _client.delete(AppConfig.apiUri('external-transfers/$id'), headers: await _headers());
+    final response = await _client.delete(
+      AppConfig.apiUri('external-transfers/$id'),
+      headers: await _headers(),
+    );
     return _decodeObject(response);
   }
 

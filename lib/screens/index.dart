@@ -36,6 +36,7 @@ export 'admin_permissions_screen.dart';
 export 'withdrawal_requests_screen.dart';
 export 'topup_requests_screen.dart';
 export 'external_transfer_followups_screen.dart';
+export 'external_transfer_accounting_screen.dart';
 export 'usage_policy_screen.dart';
 export 'contact_us_screen.dart';
 export 'support_tickets_screen.dart';
