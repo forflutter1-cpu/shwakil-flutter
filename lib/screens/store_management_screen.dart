@@ -2086,6 +2086,122 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
               )
             : null;
 
+        Widget buildInvoiceContextFields() {
+          final fields = <Widget>[
+            if (!quickSale && _warehouses.isNotEmpty)
+              DropdownButtonFormField<String>(
+                initialValue: warehouseId,
+                decoration: InputDecoration(
+                  labelText: l.text('المخزن', 'Warehouse'),
+                  prefixIcon: const Icon(Icons.warehouse_rounded),
+                ),
+                items: _warehouses
+                    .where((warehouse) => warehouse['isActive'] != false)
+                    .map(
+                      (warehouse) => DropdownMenuItem(
+                        value: warehouse['id']?.toString(),
+                        child: Text(warehouse['name']?.toString() ?? ''),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) =>
+                    setDialogState(() => warehouseId = value),
+              ),
+            if (!quickSale && _warehouses.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppTheme.surfaceVariant,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  l.text(
+                    'سيُستخدم المخزن الرئيسي تلقائيًا.',
+                    'The main warehouse will be used automatically.',
+                  ),
+                ),
+              ),
+            if (invoiceType == 'sale' || !quickSale)
+              InkWell(
+                onTap: () async {
+                  final selected = await _pickStoreEntry(
+                    title: invoiceType == 'sale'
+                        ? l.text('اختيار الزبون', 'Choose customer')
+                        : l.text('اختيار المورد', 'Choose supplier'),
+                    entries: allowedParties,
+                    searchHint: l.text(
+                      'ابحث بالاسم أو الهاتف',
+                      'Search by name or phone',
+                    ),
+                    addLabel: l.text('إضافة حساب جديد', 'Add new account'),
+                    onAdd: _addParty,
+                  );
+                  if (selected != null) {
+                    setDialogState(() => partyId = selected['id']?.toString());
+                  }
+                },
+                child: InputDecorator(
+                  decoration: InputDecoration(
+                    labelText: invoiceType == 'sale'
+                        ? paymentStatus == 'paid'
+                              ? l.text('الزبون (اختياري)', 'Customer (optional)')
+                              : l.text(
+                                  'الزبون مطلوب للبيع الآجل',
+                                  'Customer required for a balance due',
+                                )
+                        : l.text('المورد المطلوب', 'Required supplier'),
+                    prefixIcon: const Icon(Icons.person_search_rounded),
+                  ),
+                  child: Text(
+                    partyId == null
+                        ? (invoiceType == 'sale'
+                              ? l.text('زبون عام', 'General customer')
+                              : l.text('اضغط للاختيار', 'Tap to choose'))
+                        : allowedParties
+                                  .firstWhere(
+                                    (item) => item['id']?.toString() == partyId,
+                                    orElse: () => const {},
+                                  )['name']
+                                  ?.toString() ??
+                              '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+          ];
+
+          if (fields.isEmpty) return const SizedBox.shrink();
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final sideBySide =
+                  constraints.maxWidth >= 720 &&
+                  _warehouses.isNotEmpty &&
+                  fields.length > 1;
+              if (sideBySide) {
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (var index = 0; index < fields.length; index++) ...[
+                      if (index > 0) const SizedBox(width: 12),
+                      Expanded(child: fields[index]),
+                    ],
+                  ],
+                );
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var index = 0; index < fields.length; index++) ...[
+                    if (index > 0) const SizedBox(height: 10),
+                    fields[index],
+                  ],
+                ],
+              );
+            },
+          );
+        }
+
         Future<void> scanIntoInvoice() async {
           final barcode = await _scanBarcode(
             title: l.text('قراءة باركود الصنف', 'Scan item barcode'),
@@ -2421,90 +2537,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                 },
               ),
             const SizedBox(height: 12),
-            if (!quickSale && _warehouses.isNotEmpty)
-              DropdownButtonFormField<String>(
-                initialValue: warehouseId,
-                decoration: InputDecoration(
-                  labelText: l.text('المخزن', 'Warehouse'),
-                  prefixIcon: const Icon(Icons.warehouse_rounded),
-                ),
-                items: _warehouses
-                    .where((warehouse) => warehouse['isActive'] != false)
-                    .map(
-                      (warehouse) => DropdownMenuItem(
-                        value: warehouse['id']?.toString(),
-                        child: Text(warehouse['name']?.toString() ?? ''),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) => setDialogState(() => warehouseId = value),
-              ),
-            if (!quickSale && _warehouses.isEmpty)
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppTheme.primary.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  l.text(
-                    'سيُستخدم المخزن الرئيسي، وسيُنشأ تلقائيًا عند حفظ الفاتورة إذا لم يكن موجودًا.',
-                    'The main warehouse will be used and created automatically when you save if needed.',
-                  ),
-                ),
-              ),
-            if (invoiceType == 'sale' || !quickSale) const SizedBox(height: 10),
-            if (invoiceType == 'sale' || !quickSale) ...[
-              InkWell(
-                onTap: () async {
-                  final selected = await _pickStoreEntry(
-                    title: invoiceType == 'sale'
-                        ? l.text('اختيار الزبون', 'Choose customer')
-                        : l.text('اختيار المورد', 'Choose supplier'),
-                    entries: allowedParties,
-                    searchHint: l.text(
-                      'ابحث بالاسم أو الهاتف',
-                      'Search by name or phone',
-                    ),
-                    addLabel: l.text('إضافة حساب جديد', 'Add new account'),
-                    onAdd: _addParty,
-                  );
-                  if (selected != null) {
-                    setDialogState(() => partyId = selected['id']?.toString());
-                  }
-                },
-                child: InputDecorator(
-                  decoration: InputDecoration(
-                    labelText: invoiceType == 'sale'
-                        ? paymentStatus == 'paid'
-                              ? l.text(
-                                  'الزبون (اختياري)',
-                                  'Customer (optional)',
-                                )
-                              : l.text(
-                                  'الزبون مطلوب للبيع الآجل',
-                                  'Customer required for a balance due',
-                                )
-                        : l.text('المورد المطلوب', 'Required supplier'),
-                    prefixIcon: const Icon(Icons.person_search_rounded),
-                  ),
-                  child: Text(
-                    partyId == null
-                        ? (invoiceType == 'sale'
-                              ? l.text('زبون عام', 'General customer')
-                              : l.text('اضغط للاختيار', 'Tap to choose'))
-                        : allowedParties
-                                  .firstWhere(
-                                    (item) => item['id']?.toString() == partyId,
-                                    orElse: () => const {},
-                                  )['name']
-                                  ?.toString() ??
-                              '',
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-            ],
+            buildInvoiceContextFields(),
             if (creditLimitMessage != null) ...[
               Container(
                 padding: const EdgeInsets.all(12),
