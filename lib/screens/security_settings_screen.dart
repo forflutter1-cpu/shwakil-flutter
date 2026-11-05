@@ -726,6 +726,7 @@ class _SecuritySettingsScreenState extends State<SecuritySettingsScreen> {
     final confirmation = await TransferSecurityService.confirmTransfer(
       context,
       allowOtpFallback: true,
+      otpPurpose: 'pin_security',
     );
     if (!mounted || !confirmation.isVerified) {
       return;
@@ -789,6 +790,7 @@ class _SecuritySettingsScreenState extends State<SecuritySettingsScreen> {
     final confirmation = await TransferSecurityService.confirmTransfer(
       context,
       allowOtpFallback: true,
+      otpPurpose: 'pin_security',
     );
     if (!mounted || !confirmation.isVerified) {
       return;

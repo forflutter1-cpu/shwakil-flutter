@@ -47,7 +47,7 @@ dependencies:
   mobile_scanner: ^7.1.2
   qr_flutter: ^4.1.0
   shared_preferences: ^2.5.3
-  flutter_secure_storage: ^9.2.2
+  flutter_secure_storage: ^10.3.4
   cryptography: ^2.7.0
   flutter_local_notifications: ^18.0.1
   local_auth: ^2.3.0
@@ -65,12 +65,14 @@ dependencies:
   # Utilities
   intl: ^0.20.2
   uuid: ^4.0.0
+  enough_convert: ^1.6.0
 
   # UI
   url_launcher: ^6.3.2
   geolocator: ^14.0.2
   flutter_map: ^8.2.2
   latlong2: ^0.9.1
+  web: ^1.1.1
   webview_flutter: ^4.13.0
   firebase_core: ^4.7.0
   firebase_messaging: ^16.2.0

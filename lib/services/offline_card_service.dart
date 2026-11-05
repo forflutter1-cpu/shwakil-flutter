@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/index.dart';
 import '../localization/app_localization.dart';
+import 'secure_storage_config.dart';
 
 class OfflineCardService {
   static const _cardsKeyPrefix = 'offline_cards_cache_';
@@ -28,7 +29,7 @@ class OfflineCardService {
   static const Uuid _uuid = Uuid();
   static final Map<String, Future<void>> _queueTails = {};
   static final AesGcm _cipher = AesGcm.with256bits();
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
 
   Future<void> cacheCards({
     required String userId,

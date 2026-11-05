@@ -101,16 +101,16 @@ class _ExternalTransferAccountingScreenState
   Future<void> _closeAccount(Map<String, dynamic> employee) async {
     final id = int.tryParse('${employee['employeeId'] ?? employee['id']}');
     if (id == null) return;
-    final count = int.tryParse('${employee['openTransfers'] ?? 0}') ?? 0;
+    final count = int.tryParse('${employee['settleableTransfers'] ?? 0}') ?? 0;
     if (count == 0) return;
     final name = employee['employeeName'] ?? employee['name'] ?? 'التابع';
-    final amount = _money(employee['openAmount']);
+    final amount = _money(employee['settleableAmount']);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('إغلاق الفترة المحاسبية'),
         content: Text(
-          'سيتم إغلاق $count حركة لحساب $name بإجمالي $amount ₪ وحفظها في سجل الإغلاقات. تبدأ بعد ذلك فترة جديدة للحركات التالية.',
+          'سيتم إغلاق $count حركة وصلت لحساب $name بإجمالي $amount ₪. ستبقى الحركات المعلقة أو التي لم تصل مفتوحة وقابلة للتحديث.',
         ),
         actions: [
           TextButton(
@@ -312,7 +312,10 @@ class _ExternalTransferAccountingScreenState
   Widget _employeeCard(Map<String, dynamic> employee) {
     final id = int.tryParse('${employee['employeeId']}') ?? 0;
     final count = int.tryParse('${employee['openTransfers']}') ?? 0;
+    final settleableCount =
+        int.tryParse('${employee['settleableTransfers']}') ?? 0;
     final amount = _money(employee['openAmount']);
+    final settleableAmount = _money(employee['settleableAmount']);
     final profit = _money(employee['openProfit']);
     final busy = _settlingEmployeeId == id;
     return Padding(
@@ -336,13 +339,16 @@ class _ExternalTransferAccountingScreenState
                   children: [
                     Text('$count حركة مفتوحة'),
                     Text('الإجمالي: $amount ₪'),
+                    Text(
+                      'وصلت وجاهزة للإغلاق: $settleableCount • $settleableAmount ₪',
+                    ),
                     Text('الربح: $profit ₪'),
                   ],
                 ),
               ],
             );
             final button = FilledButton.tonalIcon(
-              onPressed: count == 0 || _settlingEmployeeId != null
+              onPressed: settleableCount == 0 || _settlingEmployeeId != null
                   ? null
                   : () => _closeAccount(employee),
               icon: busy

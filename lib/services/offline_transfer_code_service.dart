@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'secure_storage_config.dart';
+
 class OfflineTransferCodeService {
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const FlutterSecureStorage _storage = appSecureStorage;
   static const String _keyPrefix = 'offline_temp_transfer_slots_';
 
   Future<List<Map<String, dynamic>>> getSlots(String userId) async {

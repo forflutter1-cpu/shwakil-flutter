@@ -18,6 +18,30 @@ void main() {
     await LocalSecurityService.clearTrustedState();
   });
 
+  test('a configured local lock cannot be skipped when relock is required', () {
+    expect(
+      LocalSecurityService.mustUnlockBeforeContinuing(
+        hasLocalSecurity: true,
+        relockRequired: true,
+      ),
+      isTrue,
+    );
+    expect(
+      LocalSecurityService.mustUnlockBeforeContinuing(
+        hasLocalSecurity: false,
+        relockRequired: true,
+      ),
+      isFalse,
+    );
+    expect(
+      LocalSecurityService.mustUnlockBeforeContinuing(
+        hasLocalSecurity: true,
+        relockRequired: false,
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'stores a salted PBKDF2 PIN and accepts normalized Arabic digits',
     () async {
@@ -88,6 +112,18 @@ void main() {
     expect(LocalSecurityService.relockRequired, isTrue);
     expect(LocalSecurityService.securitySetupRequired, isFalse);
   });
+
+  test(
+    'requires relock when local PIN exists but trust marker is absent',
+    () async {
+      await LocalSecurityService.savePin('1234');
+      await LocalSecurityService.clearRelockRequirement();
+
+      await LocalSecurityService.syncRelockStateForLaunch();
+
+      expect(LocalSecurityService.relockRequired, isTrue);
+    },
+  );
 
   test(
     'does not force security setup on an unsecured trusted device',

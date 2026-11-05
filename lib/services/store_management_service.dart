@@ -3,13 +3,14 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api_service.dart';
+import 'secure_storage_config.dart';
 
 class StoreManagementService {
   static const _snapshotKeyPrefix = 'store_management_snapshot_';
@@ -18,21 +19,27 @@ class StoreManagementService {
   static const _queueKeyPrefix = 'store_management_queue_';
   static const _offlineKeyName = 'store_management_aes_key_v1';
   static final AesGcm _cipher = AesGcm.with256bits();
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static const Uuid _uuid = Uuid();
   static final Map<String, Future<void>> _userLocks = {};
+  static final Map<String, Future<void>> _syncLocks = {};
 
   Future<Map<String, dynamic>> getSnapshot(String userId) async {
     final prefs = await SharedPreferences.getInstance();
-    final decoded = await _decodeObject(
-      prefs.getString('$_snapshotKeyPrefix$userId'),
-    );
+    final key = '$_snapshotKeyPrefix$userId';
+    final raw = prefs.getString(key);
+    final decoded = await _decodeObject(raw);
+    await _upgradeLegacyCache(prefs, key, raw);
     return decoded;
   }
 
   Future<List<Map<String, dynamic>>> getPendingOperations(String userId) async {
     final prefs = await SharedPreferences.getInstance();
-    return _decodeList(prefs.getString('$_queueKeyPrefix$userId'));
+    final key = '$_queueKeyPrefix$userId';
+    final raw = prefs.getString(key);
+    final decoded = await _decodeList(raw);
+    await _upgradeLegacyCache(prefs, key, raw);
+    return decoded;
   }
 
   Future<void> removePendingOperation({
@@ -63,19 +70,24 @@ class StoreManagementService {
   Future<Map<String, dynamic>> refresh({
     required String userId,
     required ApiService api,
-  }) => _serialized(userId, () => _refreshUnlocked(userId: userId, api: api));
+  }) => _serializedSync(
+    userId,
+    () => _fetchAndStoreSnapshot(userId: userId, api: api),
+  );
 
-  Future<Map<String, dynamic>> _refreshUnlocked({
+  Future<Map<String, dynamic>> _fetchAndStoreSnapshot({
     required String userId,
     required ApiService api,
   }) async {
     final snapshot = await api.getStoreManagementSnapshot();
-    final confirmed = await _preserveConfirmedMaintenance(userId, snapshot);
-    await _storeConfirmedSnapshot(userId, confirmed);
-    final pending = await getPendingOperations(userId);
-    final composed = _replayPendingOperations(confirmed, pending);
-    await _storeSnapshot(userId, composed);
-    return composed;
+    return _serialized(userId, () async {
+      final confirmed = await _preserveConfirmedMaintenance(userId, snapshot);
+      await _storeConfirmedSnapshot(userId, confirmed);
+      final pending = await getPendingOperations(userId);
+      final composed = _replayPendingOperations(confirmed, pending);
+      await _storeSnapshot(userId, composed);
+      return composed;
+    });
   }
 
   Future<Map<String, dynamic>> getMaintenanceSnapshot(String userId) async =>
@@ -281,84 +293,121 @@ class StoreManagementService {
   Future<Map<String, dynamic>> syncPending({
     required String userId,
     required ApiService api,
-  }) =>
-      _serialized(userId, () => _syncPendingUnlocked(userId: userId, api: api));
+  }) => _serializedSync(
+    userId,
+    () => _syncPendingUnlocked(userId: userId, api: api),
+  );
 
   Future<Map<String, dynamic>> _syncPendingUnlocked({
     required String userId,
     required ApiService api,
   }) async {
-    final operations = await getPendingOperations(userId);
+    final operations = await _serialized(
+      userId,
+      () => getPendingOperations(userId),
+    );
     if (operations.isEmpty) {
-      return _refreshUnlocked(userId: userId, api: api);
+      return _fetchAndStoreSnapshot(userId: userId, api: api);
     }
 
-    final remaining = operations
-        .map((item) => Map<String, dynamic>.from(item))
-        .toList();
     Map<String, dynamic>? latestSnapshot;
     Object? firstError;
+    final attemptedOperationIds = <String>{};
 
-    final syncOperations =
-        operations.map((item) => Map<String, dynamic>.from(item)).toList()
-          ..sort(_syncPriorityCompare);
+    while (true) {
+      final pending = await _serialized(
+        userId,
+        () => getPendingOperations(userId),
+      );
+      if (pending.isEmpty) break;
+      final sorted =
+          pending.map((item) => Map<String, dynamic>.from(item)).toList()
+            ..sort(_syncPriorityCompare);
+      Map<String, dynamic>? operation;
+      for (final candidate in sorted) {
+        final opId = candidate['opId']?.toString() ?? '';
+        if (attemptedOperationIds.contains(opId)) continue;
+        if (candidate['deferUntilNoPendingInvoices'] == true &&
+            pending.any((item) => item['entity'] == 'invoice')) {
+          continue;
+        }
+        operation = candidate;
+        break;
+      }
+      final currentOperation = operation;
+      if (currentOperation == null) break;
+      attemptedOperationIds.add(currentOperation['opId']?.toString() ?? '');
 
-    for (final operation in syncOperations) {
       try {
         final snapshot = await api.syncStoreManagement([
-          _operationPayload(operation),
+          _operationPayload(currentOperation),
         ]);
         final applied = (snapshot['applied'] as List? ?? const [])
             .whereType<Map>()
             .any(
               (item) =>
-                  item['opId']?.toString() == operation['opId']?.toString(),
+                  item['opId']?.toString() ==
+                  currentOperation['opId']?.toString(),
             );
         if (!applied) {
           throw StateError(
-            'لم يؤكد الخادم تطبيق العملية ${operation['opId'] ?? ''}.',
+            'لم يؤكد الخادم تطبيق العملية ${currentOperation['opId'] ?? ''}.',
           );
         }
         latestSnapshot = snapshot;
-        final index = remaining.indexWhere(
-          (item) => _samePendingOperation(item, operation),
+        final pendingAfterResponse = await _serialized(
+          userId,
+          () => getPendingOperations(userId),
         );
-        if (index >= 0) {
-          remaining.removeAt(index);
-        }
-        await _storePendingOperations(userId, remaining);
         Map<String, dynamic> rebaseSource = snapshot;
-        if (operation['entity'] == 'maintenance' ||
-            remaining.any((item) => item['entity'] == 'maintenance')) {
+        if (currentOperation['entity'] == 'maintenance' ||
+            pendingAfterResponse.any(
+              (item) => item['entity'] == 'maintenance',
+            )) {
           final maintenance = await api.getMaintenanceSnapshot();
           rebaseSource = {...snapshot, 'maintenance': maintenance};
         }
-        rebaseSource = await _preserveConfirmedMaintenance(
-          userId,
-          rebaseSource,
-        );
-        await _storeConfirmedSnapshot(userId, rebaseSource);
-        await _storeSnapshot(
-          userId,
-          _replayPendingOperations(rebaseSource, remaining),
-        );
+        await _serialized(userId, () async {
+          final currentPending = await getPendingOperations(userId);
+          final remaining = currentPending
+              .where((item) => !_samePendingOperation(item, currentOperation))
+              .toList();
+          await _storePendingOperations(userId, remaining);
+          rebaseSource = await _preserveConfirmedMaintenance(
+            userId,
+            rebaseSource,
+          );
+          await _storeConfirmedSnapshot(userId, rebaseSource);
+          await _storeSnapshot(
+            userId,
+            _replayPendingOperations(rebaseSource, remaining),
+          );
+        });
       } catch (error) {
         firstError ??= error;
-        final index = remaining.indexWhere(
-          (item) => _samePendingOperation(item, operation),
-        );
-        if (index >= 0) {
-          remaining[index] = {
-            ...remaining[index],
-            'syncStatus': 'failed',
-            'lastSyncError': error.toString(),
-            'lastSyncAttemptAt': DateTime.now().toIso8601String(),
-          };
-          await _storePendingOperations(userId, remaining);
-        }
+        await _serialized(userId, () async {
+          final remaining = await getPendingOperations(userId);
+          final index = remaining.indexWhere(
+            (item) => _samePendingOperation(item, currentOperation),
+          );
+          if (index >= 0) {
+            remaining[index] = {
+              ...remaining[index],
+              'syncStatus': 'failed',
+              'lastSyncError': error.toString(),
+              'lastSyncAttemptAt': DateTime.now().toIso8601String(),
+            };
+            await _storePendingOperations(userId, remaining);
+          }
+        });
+        if (error is TimeoutException || error is http.ClientException) break;
       }
     }
 
+    final remaining = await _serialized(
+      userId,
+      () => getPendingOperations(userId),
+    );
     if (remaining.isNotEmpty && firstError != null) {
       throw StoreManagementSyncException(
         'تعذر مزامنة ${remaining.length} عملية. راجع تفاصيل العمليات المعلقة واحذف العملية القديمة أو صحح بياناتها.',
@@ -366,7 +415,9 @@ class StoreManagementService {
       );
     }
 
-    return latestSnapshot ?? refresh(userId: userId, api: api);
+    return latestSnapshot == null
+        ? _fetchAndStoreSnapshot(userId: userId, api: api)
+        : _serialized(userId, () => getSnapshot(userId));
   }
 
   Map<String, dynamic> _replayPendingOperations(
@@ -387,9 +438,11 @@ class StoreManagementService {
 
   Future<Map<String, dynamic>> _getConfirmedSnapshot(String userId) async {
     final prefs = await SharedPreferences.getInstance();
-    return _decodeObject(
-      prefs.getString('$_confirmedSnapshotKeyPrefix$userId'),
-    );
+    final key = '$_confirmedSnapshotKeyPrefix$userId';
+    final raw = prefs.getString(key);
+    final decoded = await _decodeObject(raw);
+    await _upgradeLegacyCache(prefs, key, raw);
+    return decoded;
   }
 
   Future<void> _storeConfirmedSnapshot(
@@ -427,6 +480,7 @@ class StoreManagementService {
     required String userId,
     String? serverId,
     String? clientRef,
+    String? sku,
     required String name,
     required String baseUnit,
     required double minimumStock,
@@ -470,6 +524,7 @@ class StoreManagementService {
       'serverId': ?serverId,
       'clientRef': client,
       'name': name.trim(),
+      'sku': ?sku,
       'baseUnit': baseUnit,
       'minimumStock': minimumStock,
       'defaultSalePrice': salePrice,
@@ -516,9 +571,12 @@ class StoreManagementService {
     required String userId,
     required String type,
     required String name,
+    String? serverId,
+    String? clientRef,
     String phone = '',
     String notes = '',
     String? debtBookCustomerId,
+    double? creditLimit,
   }) {
     if (name.trim().isEmpty) {
       throw StateError('اسم العميل أو المورد مطلوب.');
@@ -526,12 +584,17 @@ class StoreManagementService {
     if (!['customer', 'supplier', 'both'].contains(type)) {
       throw StateError('نوع الحساب غير صالح.');
     }
+    if (creditLimit != null && creditLimit < 0) {
+      throw StateError('حد الدين لا يمكن أن يكون سالبًا.');
+    }
     return _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'party',
       'type': 'upsert',
-      'clientRef': _uuid.v4(),
+      'serverId': ?serverId,
+      'clientRef': clientRef ?? _uuid.v4(),
       'debtBookCustomerId': ?debtBookCustomerId,
+      'creditLimit': ?creditLimit,
       'partyType': type,
       'name': name.trim(),
       'phone': phone.trim(),
@@ -554,31 +617,103 @@ class StoreManagementService {
     required List<Map<String, dynamic>> items,
     double discount = 0,
     String notes = '',
+    String? invoiceNumber,
+    String? clientRef,
+    DateTime? occurredAt,
     bool quickSale = false,
     String? actorUserId,
     String? actorName,
+    bool canEditStorePrices = true,
+    bool canManageStoreDebts = false,
   }) async {
+    var invoiceItems = items
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+    if (invoiceType == 'sale' && !canEditStorePrices) {
+      if (discount > 0) {
+        throw StateError('لا تملك صلاحية اعتماد خصم على فاتورة البيع.');
+      }
+      final snapshot = await getSnapshot(userId);
+      final products = _list(snapshot['products']);
+      invoiceItems = invoiceItems.map((item) {
+        final product = products.firstWhere(
+          (entry) =>
+              entry['id']?.toString() == item['productId']?.toString() ||
+              (item['productClientRef'] != null &&
+                  entry['clientRef']?.toString() ==
+                      item['productClientRef']?.toString()),
+          orElse: () => const <String, dynamic>{},
+        );
+        if (product.isEmpty) return item;
+        final units = _list(product['units']);
+        final unit = units.firstWhere(
+          (entry) =>
+              entry['id']?.toString() ==
+                  (item['productUnitId'] ?? item['unitId'])?.toString() ||
+              (item['unitClientRef'] != null &&
+                  entry['clientRef']?.toString() ==
+                      item['unitClientRef']?.toString()),
+          orElse: () => units.isNotEmpty ? units.first : const {},
+        );
+        final factor = (unit['factorToBase'] as num?)?.toDouble() ?? 1;
+        final unitPrice = (unit['salePrice'] as num?)?.toDouble() ?? 0;
+        final productPrice =
+            (product['defaultSalePrice'] as num?)?.toDouble() ?? 0;
+        item['unitPrice'] = unitPrice > 0 ? unitPrice : productPrice * factor;
+        return item;
+      }).toList();
+    }
     _validateInvoiceInput(
       invoiceType: invoiceType,
       partyId: partyId,
       partyClientRef: partyClientRef,
       paidAmount: paidAmount,
       discount: discount,
-      items: items,
+      quickSale: quickSale,
+      canManageStoreDebts: canManageStoreDebts,
+      items: invoiceItems,
     );
+    if (invoiceType == 'sale' && (partyId != null || partyClientRef != null)) {
+      final subtotal = invoiceItems.fold<double>(
+        0,
+        (sum, item) =>
+            sum +
+            ((item['quantity'] as num?)?.toDouble() ?? 0) *
+                ((item['unitPrice'] as num?)?.toDouble() ?? 0),
+      );
+      final due = (subtotal - discount - paidAmount).clamp(0, subtotal);
+      if (due > 0.009) {
+        final snapshot = await getSnapshot(userId);
+        final party = _list(snapshot['parties']).firstWhere(
+          (entry) =>
+              entry['id']?.toString() == partyId ||
+              (partyClientRef != null &&
+                  entry['clientRef']?.toString() == partyClientRef),
+          orElse: () => const <String, dynamic>{},
+        );
+        final limit = (party['creditLimit'] as num?)?.toDouble() ?? 0;
+        final balance = (party['receivableBalance'] as num?)?.toDouble() ?? 0;
+        if (limit > 0 && balance + due > limit + 0.009) {
+          final remaining = (limit - balance).clamp(0, limit);
+          throw StateError(
+            'تم إيقاف البيع الآجل: المتبقي من حد الدين ${_money(remaining)}.',
+          );
+        }
+      }
+    }
     if (invoiceType == 'sale') {
       await _validateStoreStock(
         userId: userId,
         warehouseId: warehouseId,
         warehouseClientRef: warehouseClientRef,
-        items: items,
+        items: invoiceItems,
       );
     }
     await _enqueueAndApply(userId, {
       'opId': _uuid.v4(),
       'entity': 'invoice',
       'type': 'create',
-      'clientRef': _uuid.v4(),
+      'clientRef': clientRef ?? _uuid.v4(),
       'invoiceType': invoiceType,
       'partyId': ?partyId,
       'partyClientRef': ?partyClientRef,
@@ -591,19 +726,24 @@ class StoreManagementService {
       'paymentMethodClientRef': ?paymentMethodClientRef,
       'discount': discount,
       'notes': notes.trim(),
+      'invoiceNumber': ?invoiceNumber,
       'quickSale': quickSale,
       'actorUserId': ?actorUserId,
       'actorName': ?actorName,
-      'occurredAt': DateTime.now().toIso8601String(),
-      'items': items,
+      'occurredAt': (occurredAt ?? DateTime.now()).toIso8601String(),
+      'items': invoiceItems,
     });
   }
 
   Future<void> queueWarehouse({
     required String userId,
     required String name,
+    String? serverId,
+    String? clientRef,
     String code = '',
     String notes = '',
+    bool isActive = true,
+    bool? isDefault,
   }) {
     if (name.trim().isEmpty) {
       throw StateError('اسم المخزن مطلوب.');
@@ -612,10 +752,13 @@ class StoreManagementService {
       'opId': _uuid.v4(),
       'entity': 'warehouse',
       'type': 'upsert',
-      'clientRef': _uuid.v4(),
+      'serverId': ?serverId,
+      'clientRef': clientRef ?? _uuid.v4(),
       'name': name.trim(),
       'code': code.trim(),
       'notes': notes.trim(),
+      'isActive': isActive,
+      'isDefault': ?isDefault,
     });
   }
 
@@ -684,6 +827,70 @@ class StoreManagementService {
     });
   }
 
+  Future<void> queueStockAdjustment({
+    required String userId,
+    String? productId,
+    String? productClientRef,
+    String? warehouseId,
+    String? warehouseClientRef,
+    String? productUnitId,
+    String? unitClientRef,
+    required double targetQuantity,
+    String? clientRef,
+    double? unitCost,
+    DateTime? occurredAt,
+    String? actorUserId,
+    String? actorName,
+    bool deferUntilNoPendingInvoices = false,
+  }) async {
+    if (targetQuantity < 0 || (unitCost != null && unitCost < 0)) {
+      throw StateError('كمية أو تكلفة الرصيد الافتتاحي غير صالحة.');
+    }
+    if ((productId == null || productId.trim().isEmpty) &&
+        (productClientRef == null || productClientRef.trim().isEmpty)) {
+      throw StateError('يجب ربط تسوية المخزون بصنف.');
+    }
+    final snapshot = await getSnapshot(userId);
+    final product = _list(snapshot['products']).firstWhere(
+      (item) =>
+          item['id']?.toString() == productId ||
+          (productClientRef != null &&
+              item['clientRef']?.toString() == productClientRef),
+      orElse: () => const <String, dynamic>{},
+    );
+    final warehouse = _list(snapshot['warehouses']).firstWhere(
+      (item) =>
+          item['id']?.toString() == warehouseId ||
+          (warehouseClientRef != null &&
+              item['clientRef']?.toString() == warehouseClientRef),
+      orElse: () => const <String, dynamic>{},
+    );
+    if (product.isEmpty || warehouse.isEmpty) {
+      throw StateError('تعذر ربط الصنف أو المخزن لتسوية المخزون.');
+    }
+    final ref = clientRef?.trim().isNotEmpty == true
+        ? clientRef!.trim()
+        : _uuid.v4();
+    await _enqueueAndApply(userId, {
+      'opId': _uuid.v4(),
+      'entity': 'stock_adjustment',
+      'type': 'set_quantity',
+      'clientRef': ref,
+      'productId': productId ?? product['id'],
+      'productClientRef': productClientRef ?? product['clientRef'],
+      'warehouseId': warehouseId ?? warehouse['id'],
+      'warehouseClientRef': warehouseClientRef ?? warehouse['clientRef'],
+      'productUnitId': ?productUnitId,
+      'unitClientRef': ?unitClientRef,
+      'targetQuantity': targetQuantity,
+      'unitCost': ?unitCost,
+      'occurredAt': (occurredAt ?? DateTime.now()).toIso8601String(),
+      'actorUserId': ?actorUserId,
+      'actorName': ?actorName,
+      if (deferUntilNoPendingInvoices) 'deferUntilNoPendingInvoices': true,
+    });
+  }
+
   Future<void> queuePayment({
     required String userId,
     String? invoiceId,
@@ -696,6 +903,9 @@ class StoreManagementService {
     String? paymentMethodId,
     String? paymentMethodClientRef,
     String notes = '',
+    String? clientRef,
+    String? reference,
+    DateTime? occurredAt,
     String? actorUserId,
     String? actorName,
   }) {
@@ -712,7 +922,7 @@ class StoreManagementService {
       'opId': _uuid.v4(),
       'entity': 'payment',
       'type': 'create',
-      'clientRef': _uuid.v4(),
+      'clientRef': clientRef ?? _uuid.v4(),
       'invoiceId': ?invoiceId,
       'invoiceClientRef': ?invoiceClientRef,
       'partyId': ?partyId,
@@ -722,10 +932,11 @@ class StoreManagementService {
       'method': method,
       'paymentMethodId': ?paymentMethodId,
       'paymentMethodClientRef': ?paymentMethodClientRef,
+      'reference': ?reference,
       'notes': notes.trim(),
       'actorUserId': ?actorUserId,
       'actorName': ?actorName,
-      'occurredAt': DateTime.now().toIso8601String(),
+      'occurredAt': (occurredAt ?? DateTime.now()).toIso8601String(),
     });
   }
 
@@ -772,6 +983,8 @@ class StoreManagementService {
     String? partyClientRef,
     required double paidAmount,
     required double discount,
+    required bool quickSale,
+    required bool canManageStoreDebts,
     required List<Map<String, dynamic>> items,
   }) {
     if (!['sale', 'purchase'].contains(invoiceType)) {
@@ -790,6 +1003,18 @@ class StoreManagementService {
       if (unitPrice < 0) {
         throw StateError('سعر الصنف لا يمكن أن يكون سالبًا.');
       }
+      if (item['manualEntry'] == true &&
+          item['productName']?.toString().trim().isEmpty != false) {
+        throw StateError('اسم الصنف اليدوي مطلوب.');
+      }
+      if (item['allowNegativeStock'] == true &&
+          !(quickSale &&
+              invoiceType == 'sale' &&
+              item['manualEntry'] == true)) {
+        throw StateError(
+          'السماح بالمخزون السالب متاح للصنف اليدوي في البيع السريع فقط.',
+        );
+      }
       subtotal += quantity * unitPrice;
     }
     if (invoiceType == 'purchase' &&
@@ -803,6 +1028,19 @@ class StoreManagementService {
     final total = subtotal - discount;
     if (paidAmount < 0 || paidAmount > total) {
       throw StateError('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الفاتورة.');
+    }
+    final due = total - paidAmount;
+    if (quickSale && (discount > 0 || due > 0.009)) {
+      throw StateError('البيع السريع يجب أن يكون مدفوعًا بالكامل وبدون خصم.');
+    }
+    if (due > 0.009) {
+      if (!canManageStoreDebts) {
+        throw StateError('لا تملك صلاحية تسجيل فواتير آجلة أو جزئية.');
+      }
+      if ((partyId == null || partyId.trim().isEmpty) &&
+          (partyClientRef == null || partyClientRef.trim().isEmpty)) {
+        throw StateError('يجب اختيار حساب زبون أو مورد للفواتير الآجلة.');
+      }
     }
   }
 
@@ -872,6 +1110,21 @@ class StoreManagementService {
         jsonEncode(_operationPayload(candidate));
   }
 
+  bool _sameOperationContent(
+    Map<String, dynamic> queued,
+    Map<String, dynamic> candidate,
+  ) {
+    final left = _operationPayload(queued)
+      ..remove('opId')
+      ..remove('createdAt')
+      ..remove('queueSequence');
+    final right = _operationPayload(candidate)
+      ..remove('opId')
+      ..remove('createdAt')
+      ..remove('queueSequence');
+    return jsonEncode(left) == jsonEncode(right);
+  }
+
   int _syncPriorityCompare(
     Map<String, dynamic> left,
     Map<String, dynamic> right,
@@ -894,6 +1147,9 @@ class StoreManagementService {
     if (entity == 'warehouse') return 2;
     if (entity == 'payment_method') return 3;
     if (entity == 'party') return 4;
+    if (entity == 'stock_adjustment') {
+      return operation['deferUntilNoPendingInvoices'] == true ? 8 : 5;
+    }
     if (entity == 'maintenance' && operation['action'] == 'create') return 5;
     if (entity == 'invoice') {
       return operation['invoiceType']?.toString() == 'purchase' ? 5 : 6;
@@ -922,7 +1178,8 @@ class StoreManagementService {
     return Map<String, dynamic>.from(operation)
       ..remove('syncStatus')
       ..remove('lastSyncError')
-      ..remove('lastSyncAttemptAt');
+      ..remove('lastSyncAttemptAt')
+      ..remove('deferUntilNoPendingInvoices');
   }
 
   Future<void> _enqueueAndApply(
@@ -930,6 +1187,30 @@ class StoreManagementService {
     Map<String, dynamic> operation,
   ) => _serialized(userId, () async {
     final snapshot = await getSnapshot(userId);
+    final entity = operation['entity']?.toString() ?? '';
+    final clientRef = operation['clientRef']?.toString().trim() ?? '';
+    if (clientRef.isNotEmpty) {
+      final snapshotKey = switch (entity) {
+        'invoice' => 'invoices',
+        'payment' => 'payments',
+        _ => '',
+      };
+      if (snapshotKey.isNotEmpty &&
+          _list(
+            snapshot[snapshotKey],
+          ).any((item) => item['clientRef']?.toString() == clientRef)) {
+        return;
+      }
+      final queue = await getPendingOperations(userId);
+      if (queue.any(
+        (pending) =>
+            pending['entity']?.toString() == entity &&
+            pending['clientRef']?.toString() == clientRef &&
+            _sameOperationContent(pending, operation),
+      )) {
+        return;
+      }
+    }
     final next = _applyLocalOperation(snapshot, operation);
     await _enqueue(userId, operation);
     await _storeSnapshot(userId, next);
@@ -946,6 +1227,24 @@ class StoreManagementService {
       completer.complete();
       if (identical(_userLocks[userId], completer.future)) {
         _userLocks.remove(userId);
+      }
+    }
+  }
+
+  Future<T> _serializedSync<T>(
+    String userId,
+    Future<T> Function() action,
+  ) async {
+    final previous = _syncLocks[userId] ?? Future<void>.value();
+    final completer = Completer<void>();
+    _syncLocks[userId] = completer.future;
+    try {
+      await previous.catchError((_) {});
+      return await action();
+    } finally {
+      completer.complete();
+      if (identical(_syncLocks[userId], completer.future)) {
+        _syncLocks.remove(userId);
       }
     }
   }
@@ -974,6 +1273,7 @@ class StoreManagementService {
     final available = <String, double>{};
     final names = <String, String>{};
     for (final raw in items) {
+      if (raw['allowNegativeStock'] == true) continue;
       final productId = raw['productId']?.toString();
       final productClientRef = raw['productClientRef']?.toString();
       final product = _list(snapshot['products']).firstWhere(
@@ -1004,17 +1304,18 @@ class StoreManagementService {
       requested[key] = (requested[key] ?? 0) + baseQuantity;
       names[key] = product['name']?.toString() ?? 'الصنف';
       final stocks = _list(product['warehouseStocks']);
+      final warehouseQuantity = stocks
+          .where(
+            (stock) =>
+                resolvedWarehouseId != null &&
+                stock['warehouseId']?.toString() == resolvedWarehouseId,
+          )
+          .firstOrNull?['quantity'];
       available[key] =
-          (stocks
-                      .where(
-                        (stock) =>
-                            stock['warehouseId']?.toString() ==
-                            resolvedWarehouseId,
-                      )
-                      .firstOrNull?['quantity']
-                  as num?)
-              ?.toDouble() ??
-          0;
+          (warehouseQuantity as num?)?.toDouble() ??
+          (stocks.isEmpty || resolvedWarehouseId == null
+              ? (product['stockQuantity'] as num?)?.toDouble() ?? 0
+              : 0);
     }
     for (final entry in requested.entries) {
       if (entry.value > (available[entry.key] ?? 0) + 0.000001) {
@@ -1065,6 +1366,9 @@ class StoreManagementService {
         break;
       case 'transfer':
         _applyLocalTransfer(next, operation);
+        break;
+      case 'stock_adjustment':
+        _applyLocalStockAdjustment(next, operation);
         break;
       case 'payment':
         _applyLocalPayment(next, operation);
@@ -1517,7 +1821,7 @@ class StoreManagementService {
       'clientRef': clientRef,
       'syncStatus': 'pending',
       'name': operation['name']?.toString() ?? '',
-      'sku': operation['sku'],
+      'sku': operation['sku'] ?? existing['sku'],
       'baseUnit': baseUnit,
       'stockQuantity': (existing['stockQuantity'] as num?)?.toDouble() ?? 0,
       'minimumStock': (operation['minimumStock'] as num?)?.toDouble() ?? 0,
@@ -1600,6 +1904,10 @@ class StoreManagementService {
           ? operation['phone'].toString()
           : debtAccount['phone']?.toString() ?? '',
       'notes': operation['notes']?.toString() ?? '',
+      'creditLimit':
+          (operation['creditLimit'] as num?)?.toDouble() ??
+          (existing['creditLimit'] as num?)?.toDouble() ??
+          0,
       'receivableBalance':
           (existing['receivableBalance'] as num?)?.toDouble() ?? 0,
       'payableBalance': (existing['payableBalance'] as num?)?.toDouble() ?? 0,
@@ -1620,14 +1928,29 @@ class StoreManagementService {
     final products = _list(snapshot['products']);
     final parties = _list(snapshot['parties']);
     final warehouses = _list(snapshot['warehouses']);
+    var resolvedWarehouse = warehouses.firstWhere(
+      (item) => item['id']?.toString() == operation['warehouseId']?.toString(),
+      orElse: () => warehouses.firstWhere(
+        (item) => item['isDefault'] == true,
+        orElse: () => warehouses.isNotEmpty ? warehouses.first : const {},
+      ),
+    );
+    if (resolvedWarehouse.isEmpty) {
+      resolvedWarehouse = {
+        'id': 'local:auto-default-warehouse',
+        'clientRef': 'auto-default-warehouse',
+        'name': 'المخزن الرئيسي',
+        'code': 'MAIN',
+        'isDefault': true,
+        'isActive': true,
+        'syncStatus': 'local',
+      };
+      warehouses.add(resolvedWarehouse);
+      snapshot['warehouses'] = warehouses;
+    }
     final warehouseId =
         operation['warehouseId']?.toString() ??
-        warehouses
-            .firstWhere(
-              (item) => item['isDefault'] == true,
-              orElse: () => warehouses.isNotEmpty ? warehouses.first : const {},
-            )['id']
-            ?.toString();
+        resolvedWarehouse['id']?.toString();
     final clientRef = operation['clientRef']?.toString() ?? _uuid.v4();
     final id = 'local:$clientRef';
     if (invoices.any(
@@ -1652,14 +1975,58 @@ class StoreManagementService {
     var costTotal = 0.0;
 
     for (final raw in _list(operation['items'])) {
-      final productId = raw['productId']?.toString();
-      final productClientRef = raw['productClientRef']?.toString();
-      final productIndex = products.indexWhere(
+      var productId = raw['productId']?.toString();
+      var productClientRef = raw['productClientRef']?.toString();
+      var productIndex = products.indexWhere(
         (item) =>
             item['id']?.toString() == productId ||
             (productClientRef != null &&
                 item['clientRef']?.toString() == productClientRef),
       );
+      if (productIndex < 0 && raw['manualEntry'] == true) {
+        productClientRef ??= _uuid.v4();
+        final unitClientRef =
+            raw['unitClientRef']?.toString().trim().isNotEmpty == true
+            ? raw['unitClientRef'].toString()
+            : _uuid.v4();
+        final baseUnit = raw['unitName']?.toString().trim().isNotEmpty == true
+            ? raw['unitName'].toString().trim()
+            : 'piece';
+        final localProduct = <String, dynamic>{
+          'id': 'local:$productClientRef',
+          'clientRef': productClientRef,
+          'syncStatus': 'pending',
+          'name': raw['productName']?.toString().trim().isNotEmpty == true
+              ? raw['productName'].toString().trim()
+              : 'صنف جديد',
+          'sku': raw['sku']?.toString(),
+          'baseUnit': baseUnit,
+          'stockQuantity': 0.0,
+          'minimumStock': (raw['minimumStock'] as num?)?.toDouble() ?? 0,
+          'averagePurchaseCost': 0.0,
+          'defaultSalePrice': (raw['salePrice'] as num?)?.toDouble() ?? 0,
+          'isActive': true,
+          'units': [
+            {
+              'id': 'local:$unitClientRef',
+              'clientRef': unitClientRef,
+              'name': baseUnit,
+              'code': baseUnit,
+              'factorToBase': 1.0,
+              'isBase': true,
+              'salePrice': (raw['salePrice'] as num?)?.toDouble() ?? 0,
+              'purchasePrice': invoiceType == 'purchase'
+                  ? (raw['unitPrice'] as num?)?.toDouble() ?? 0
+                  : 0,
+              'barcode': raw['barcode']?.toString() ?? '',
+            },
+          ],
+          'warehouseStocks': <Map<String, dynamic>>[],
+        };
+        products.add(localProduct);
+        productIndex = products.length - 1;
+        productId = localProduct['id']?.toString();
+      }
       if (productIndex < 0) continue;
       final product = products[productIndex];
       final units = _list(product['units']);
@@ -1699,6 +2066,7 @@ class StoreManagementService {
           ? (warehouseStocks[stockIndex]['quantity'] as num?)?.toDouble() ?? 0
           : 0;
       if (invoiceType == 'sale' &&
+          raw['allowNegativeStock'] != true &&
           baseQuantity > warehouseAvailable + 0.000001) {
         throw StateError(
           'الكمية المطلوبة من ${product['name'] ?? 'الصنف'} غير متوفرة في المخزن المحدد.',
@@ -1733,6 +2101,8 @@ class StoreManagementService {
         'productName': product['name'],
         'unitName': unit['name'] ?? product['baseUnit'],
         'unitFactor': factor,
+        if (raw['manualEntry'] == true) 'manualEntry': true,
+        if (raw['allowNegativeStock'] == true) 'allowNegativeStock': true,
         'quantity': quantity,
         'baseQuantity': baseQuantity,
         'unitPrice': unitPrice,
@@ -1753,7 +2123,10 @@ class StoreManagementService {
       'id': id,
       'clientRef': clientRef,
       'syncStatus': 'pending',
-      'invoiceNumber': 'محلي-${clientRef.substring(0, 6)}',
+      'invoiceNumber':
+          operation['invoiceNumber']?.toString().trim().isNotEmpty == true
+          ? operation['invoiceNumber'].toString()
+          : 'محلي-${clientRef.substring(0, 6)}',
       'type': invoiceType,
       'warehouseId': warehouseId,
       'warehouseName':
@@ -1815,18 +2188,42 @@ class StoreManagementService {
   ) {
     final warehouses = _list(snapshot['warehouses']);
     final clientRef = operation['clientRef']?.toString() ?? _uuid.v4();
-    warehouses.add({
-      'id': 'local:$clientRef',
+    final serverId = operation['serverId']?.toString();
+    final existingIndex = warehouses.indexWhere(
+      (warehouse) =>
+          (serverId != null && warehouse['id']?.toString() == serverId) ||
+          warehouse['clientRef']?.toString() == clientRef,
+    );
+    final existing = existingIndex >= 0
+        ? warehouses[existingIndex]
+        : const <String, dynamic>{};
+    final isDefault =
+        operation['isDefault'] == true ||
+        (operation['isDefault'] == null && existing['isDefault'] == true);
+    if (operation['isDefault'] == true) {
+      for (final warehouse in warehouses) {
+        warehouse['isDefault'] = false;
+      }
+    }
+    final updated = {
+      ...existing,
+      'id': existing['id']?.toString() ?? 'local:$clientRef',
       'clientRef': clientRef,
       'name': operation['name']?.toString() ?? '',
       'code': operation['code']?.toString().isNotEmpty == true
           ? operation['code'].toString()
-          : 'WH-${clientRef.substring(0, 6).toUpperCase()}',
+          : existing['code']?.toString() ??
+                'WH-${clientRef.substring(0, 6).toUpperCase()}',
       'notes': operation['notes']?.toString() ?? '',
-      'isDefault': false,
-      'isActive': true,
+      'isDefault': isDefault,
+      'isActive': operation['isActive'] != false,
       'syncStatus': 'pending',
-    });
+    };
+    if (existingIndex >= 0) {
+      warehouses[existingIndex] = updated;
+    } else {
+      warehouses.add(updated);
+    }
     snapshot['warehouses'] = warehouses;
   }
 
@@ -1886,6 +2283,69 @@ class StoreManagementService {
       product['syncStatus'] = 'pending';
       products[productIndex] = product;
     }
+    snapshot['products'] = products;
+  }
+
+  void _applyLocalStockAdjustment(
+    Map<String, dynamic> snapshot,
+    Map<String, dynamic> operation,
+  ) {
+    final products = _list(snapshot['products']);
+    final warehouses = _list(snapshot['warehouses']);
+    final productIndex = products.indexWhere(
+      (item) =>
+          item['id']?.toString() == operation['productId']?.toString() ||
+          item['clientRef']?.toString() ==
+              operation['productClientRef']?.toString(),
+    );
+    if (productIndex < 0) return;
+    final product = products[productIndex];
+    final warehouse = warehouses.firstWhere(
+      (item) =>
+          item['id']?.toString() == operation['warehouseId']?.toString() ||
+          item['clientRef']?.toString() ==
+              operation['warehouseClientRef']?.toString(),
+      orElse: () => const <String, dynamic>{},
+    );
+    final warehouseId = warehouse['id']?.toString();
+    if (warehouseId == null || warehouseId.isEmpty) return;
+    final stocks = _list(product['warehouseStocks']);
+    final stockIndex = stocks.indexWhere(
+      (item) => item['warehouseId']?.toString() == warehouseId,
+    );
+    final oldWarehouseQuantity = stockIndex >= 0
+        ? (stocks[stockIndex]['quantity'] as num?)?.toDouble() ?? 0
+        : 0.0;
+    final target = (operation['targetQuantity'] as num?)?.toDouble() ?? 0;
+    final change = target - oldWarehouseQuantity;
+    final oldTotal = (product['stockQuantity'] as num?)?.toDouble() ?? 0;
+    final newTotal = oldTotal + change;
+    if (target < 0 || newTotal < -0.000001) {
+      throw StateError('تسوية المخزون لا يمكن أن تجعل الرصيد سالبًا.');
+    }
+    if (stockIndex >= 0) {
+      stocks[stockIndex]['quantity'] = _decimal(target, 4);
+    } else {
+      stocks.add({
+        'warehouseId': warehouseId,
+        'quantity': _decimal(target, 4),
+        'minimumStock': product['minimumStock'] ?? 0,
+      });
+    }
+    product['warehouseStocks'] = stocks;
+    product['stockQuantity'] = _decimal(max(0, newTotal), 4);
+    final unitCost = (operation['unitCost'] as num?)?.toDouble();
+    if (unitCost != null && unitCost >= 0) {
+      product['averagePurchaseCost'] = _decimal(unitCost, 4);
+      final units = _list(product['units']);
+      final baseUnitIndex = units.indexWhere((unit) => unit['isBase'] == true);
+      if (baseUnitIndex >= 0) {
+        units[baseUnitIndex]['purchasePrice'] = _decimal(unitCost, 4);
+        product['units'] = units;
+      }
+    }
+    product['syncStatus'] = 'pending';
+    products[productIndex] = product;
     snapshot['products'] = products;
   }
 
@@ -2191,13 +2651,6 @@ class StoreManagementService {
   };
 
   Future<String> _encode(Object payload) async {
-    // flutter_secure_storage's web implementation can fail while resolving a
-    // browser key ("null.toString" in minified web builds). Browser storage is
-    // already scoped to the signed-in browser profile, so keep the offline
-    // cache plain on web and reserve AES/keychain storage for native apps.
-    if (kIsWeb) {
-      return jsonEncode(payload);
-    }
     final secretKey = await _getOrCreateSecretKey();
     final box = await _cipher.encrypt(
       utf8.encode(jsonEncode(payload)),
@@ -2230,11 +2683,6 @@ class StoreManagementService {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is Map && decoded['v'] == 1) {
-        // Existing encrypted browser cache cannot reliably use the native
-        // secure-storage key. It will be rebuilt from the server on refresh.
-        if (kIsWeb) {
-          return null;
-        }
         final clear = await _cipher.decrypt(
           SecretBox(
             base64Decode(decoded['cipherText']?.toString() ?? ''),
@@ -2248,6 +2696,38 @@ class StoreManagementService {
       return decoded;
     } catch (_) {
       return null;
+    }
+  }
+
+  Future<void> _upgradeLegacyCache(
+    SharedPreferences prefs,
+    String key,
+    String? raw,
+  ) async {
+    if (raw == null || raw.trim().isEmpty) return;
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } catch (_) {
+      return;
+    }
+    if (decoded is Map &&
+        decoded['v'] == 1 &&
+        decoded['cipherText'] is String &&
+        decoded['nonce'] is String &&
+        decoded['mac'] is String) {
+      return;
+    }
+    if (decoded is Map || decoded is List) {
+      // Do not expose or overwrite a legacy cache until encryption succeeds.
+      // Keep its original bytes for recovery if secure storage is unavailable;
+      // callers receive an error and must retry from HTTPS or localhost.
+      final encrypted = await _encode(decoded as Object);
+      final stored = await prefs.setString(key, encrypted);
+      if (!stored) {
+        await prefs.remove(key);
+        throw StateError('Unable to persist encrypted offline data.');
+      }
     }
   }
 

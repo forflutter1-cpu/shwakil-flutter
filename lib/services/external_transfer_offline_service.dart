@@ -5,9 +5,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api_service.dart';
+import 'secure_storage_config.dart';
 
 class ExternalTransferOfflineService {
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+  static const FlutterSecureStorage _storage = appSecureStorage;
   static const Uuid _uuid = Uuid();
   static const String _queuePrefix = 'external_transfer_queue_v1_';
   static const String _snapshotPrefix = 'external_transfer_snapshot_v1_';

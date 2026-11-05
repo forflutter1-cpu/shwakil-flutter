@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/index.dart';
+import '../services/secure_storage_config.dart';
 import '../utils/app_permissions.dart';
 import '../utils/app_theme.dart';
 import '../utils/currency_formatter.dart';
@@ -24,7 +25,7 @@ class AffiliateCenterScreen extends StatefulWidget {
 
 class _AffiliateCenterScreenState extends State<AffiliateCenterScreen> {
   static const String _cacheKeyPrefix = 'affiliate_center_cache_';
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   final ApiService _apiService = ApiService();
   final AuthService _authService = AuthService();
 

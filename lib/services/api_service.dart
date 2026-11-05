@@ -32,6 +32,7 @@ class ApiService {
   final http.Client _client;
   static const Duration _publicRequestTimeout = Duration(seconds: 8);
   static const Duration _authenticatedRequestTimeout = Duration(seconds: 12);
+  static const Duration _storeManagementRequestTimeout = Duration(seconds: 6);
   static const Duration _authSettingsCacheLifetime = Duration(minutes: 5);
   static const Duration _notificationSummaryCacheLifetime = Duration(
     seconds: 20,
@@ -2111,9 +2112,12 @@ class ApiService {
     return _decodeObject(response);
   }
 
-  Future<OtpRequestResult> requestTransferSecurityOtp() async {
+  Future<OtpRequestResult> requestTransferSecurityOtp({
+    String purpose = 'transfer_security',
+  }) async {
     final response = await _client.post(
       AppConfig.apiUri('auth/transfer-security/request-otp'),
+      body: {'purpose': purpose},
       headers: await _headers(),
     );
     final body = _decodeObject(response);
@@ -3472,22 +3476,30 @@ class ApiService {
     return _decodeObject(response);
   }
 
-  Future<Map<String, dynamic>> getStoreManagementSnapshot() async {
-    final response = await _client.get(
-      AppConfig.apiUri('store-management/snapshot'),
-      headers: await _headers(),
-    );
+  Future<Map<String, dynamic>> getStoreManagementSnapshot({
+    bool includeFullHistory = false,
+  }) async {
+    final response = await _client
+        .get(
+          AppConfig.apiUri('store-management/snapshot', {
+            if (includeFullHistory) 'include_full_history': '1',
+          }),
+          headers: await _headers(),
+        )
+        .timeout(_storeManagementRequestTimeout);
     return _decodeObject(response);
   }
 
   Future<Map<String, dynamic>> syncStoreManagement(
     List<Map<String, dynamic>> operations,
   ) async {
-    final response = await _client.post(
-      AppConfig.apiUri('store-management/sync'),
-      headers: await _headers(),
-      body: jsonEncode({'operations': operations}),
-    );
+    final response = await _client
+        .post(
+          AppConfig.apiUri('store-management/sync'),
+          headers: await _headers(),
+          body: jsonEncode({'operations': operations}),
+        )
+        .timeout(_storeManagementRequestTimeout);
     return _decodeObject(response);
   }
 
@@ -3495,13 +3507,15 @@ class ApiService {
     String search = '',
     String status = '',
   }) async {
-    final response = await _client.get(
-      AppConfig.apiUri('maintenance-management/snapshot', {
-        if (search.trim().isNotEmpty) 'search': search.trim(),
-        if (status.trim().isNotEmpty) 'status': status.trim(),
-      }),
-      headers: await _headers(),
-    );
+    final response = await _client
+        .get(
+          AppConfig.apiUri('maintenance-management/snapshot', {
+            if (search.trim().isNotEmpty) 'search': search.trim(),
+            if (status.trim().isNotEmpty) 'status': status.trim(),
+          }),
+          headers: await _headers(),
+        )
+        .timeout(_storeManagementRequestTimeout);
     return _decodeObject(response);
   }
 

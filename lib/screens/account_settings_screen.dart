@@ -909,6 +909,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       context,
       allowOtpFallback: true,
       allowNoPhoneAccount: true,
+      otpPurpose: 'pin_security',
     );
     if (!mounted || !confirmation.isVerified) {
       return;
@@ -964,6 +965,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     final confirmation = await TransferSecurityService.confirmTransfer(
       context,
       allowOtpFallback: true,
+      otpPurpose: 'pin_security',
     );
     if (!mounted || !confirmation.isVerified) {
       return;

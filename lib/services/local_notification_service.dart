@@ -18,8 +18,13 @@ class LocalNotificationService {
   static bool _initialized = false;
   static bool _permissionsRequested = false;
 
+  static bool get _supportsLocalNotifications =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS;
+
   static Future<void> initialize() async {
-    if (_initialized || kIsWeb) {
+    if (_initialized || kIsWeb || !_supportsLocalNotifications) {
       return;
     }
 
@@ -64,7 +69,7 @@ class LocalNotificationService {
   }
 
   static Future<void> ensurePermissionsRequested() async {
-    if (_permissionsRequested || kIsWeb) {
+    if (_permissionsRequested || kIsWeb || !_supportsLocalNotifications) {
       return;
     }
     await initialize();
@@ -99,7 +104,7 @@ class LocalNotificationService {
     required String body,
     bool isCredit = true,
   }) async {
-    if (kIsWeb) {
+    if (kIsWeb || !_supportsLocalNotifications) {
       return;
     }
 
@@ -134,7 +139,7 @@ class LocalNotificationService {
     String? channelName,
     Map<String, dynamic>? payload,
   }) async {
-    if (kIsWeb) {
+    if (kIsWeb || !_supportsLocalNotifications) {
       return;
     }
 

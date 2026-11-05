@@ -698,7 +698,7 @@ class MyApp extends StatelessWidget {
                     minScaleFactor: 0.8,
                     maxScaleFactor: 1.4,
                     child: _RootBackNavigationGuard(
-                      child: _AdaptiveWebSidebarShell(
+                      child: _AdaptiveDesktopSidebarShell(
                         child: child ?? const SizedBox.shrink(),
                       ),
                     ),
@@ -765,6 +765,12 @@ class _RootBackNavigationGuardState extends State<_RootBackNavigationGuard> {
         return;
       }
 
+      // Native desktop windows own their close action; do not show the mobile
+      // "exit app" prompt when the user presses a desktop back shortcut.
+      if (AppSidebar.isDesktopPlatform) {
+        return;
+      }
+
       final shouldExit = await _confirmExit();
       if (shouldExit) {
         await SystemNavigator.pop();
@@ -789,10 +795,9 @@ class _RootBackNavigationGuardState extends State<_RootBackNavigationGuard> {
   }
 }
 
-class _AdaptiveWebSidebarShell extends StatelessWidget {
-  const _AdaptiveWebSidebarShell({required this.child});
+class _AdaptiveDesktopSidebarShell extends StatelessWidget {
+  const _AdaptiveDesktopSidebarShell({required this.child});
 
-  static const double _desktopBreakpoint = AppSidebar.desktopBreakpoint;
   static const double _sidebarWidth = 340;
   static const Set<String> _publicRoutes = {
     '/login',
@@ -806,21 +811,32 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!kIsWeb) {
+    if (!kIsWeb && !AppSidebar.isDesktopPlatform) {
       return child;
     }
 
-    final cachedHasSession =
-        (AuthService.peekToken()?.isNotEmpty ?? false) ||
-        AuthService.peekCurrentUser() != null;
-    if (cachedHasSession) {
-      return _buildWithRouteState(context, hasSession: true);
-    }
+    // The first build can happen on /login before authentication finishes.
+    // Re-check the in-memory session whenever navigation changes so a successful
+    // login reveals the sidebar immediately without requiring a page reload.
+    return AnimatedBuilder(
+      animation: appRouteObserver,
+      builder: (context, _) {
+        final cachedHasSession =
+            (AuthService.peekToken()?.isNotEmpty ?? false) ||
+            AuthService.peekCurrentUser() != null;
+        if (cachedHasSession) {
+          return _buildWithRouteState(context, hasSession: true);
+        }
 
-    return FutureBuilder<bool>(
-      future: AuthService().isLoggedIn(),
-      builder: (context, snapshot) {
-        return _buildWithRouteState(context, hasSession: snapshot.data == true);
+        return FutureBuilder<bool>(
+          future: AuthService().isLoggedIn(),
+          builder: (context, snapshot) {
+            return _buildWithRouteState(
+              context,
+              hasSession: snapshot.data == true,
+            );
+          },
+        );
       },
     );
   }
@@ -840,7 +856,7 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
                 hasSession &&
                 !LocalSecurityService.relockRequired &&
                 !_publicRoutes.contains(routeName) &&
-                MediaQuery.sizeOf(context).width >= _desktopBreakpoint;
+                AppSidebar.usesPersistentNavigation(context);
 
             if (!showSidebar) {
               return child;
@@ -849,6 +865,8 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
             final activeRouteName = routeName == '/app-shell'
                 ? '/home'
                 : routeName;
+            final sidebarOnRight =
+                Directionality.of(context) == TextDirection.rtl;
             // Navigator/Overlay can retain a full-viewport hit-test region
             // even when visually constrained inside a Row. Put the desktop
             // sidebar above it in a Stack, and reserve its width for content,
@@ -859,14 +877,18 @@ class _AdaptiveWebSidebarShell extends StatelessWidget {
                 children: [
                   Positioned.fill(
                     child: Padding(
-                      padding: const EdgeInsets.only(right: _sidebarWidth + 1),
+                      padding: EdgeInsets.only(
+                        right: sidebarOnRight ? _sidebarWidth + 1 : 0,
+                        left: sidebarOnRight ? 0 : _sidebarWidth + 1,
+                      ),
                       child: child,
                     ),
                   ),
                   Positioned(
                     top: 0,
                     bottom: 0,
-                    right: 0,
+                    left: sidebarOnRight ? null : 0,
+                    right: sidebarOnRight ? 0 : null,
                     child: SizedBox(
                       width: _sidebarWidth,
                       child: AppSidebar(
@@ -1213,7 +1235,8 @@ class _AppEntryPointState extends State<AppEntryPoint> {
     final hasLocalSecurity =
         await LocalSecurityService.hasConfiguredLocalSecurity().timeout(
           const Duration(seconds: 1),
-          onTimeout: () => false,
+          // Unknown lock state must not be treated as an unsecured account.
+          onTimeout: () => true,
         );
     final skipNextUnlock = await LocalSecurityService.consumeSkipNextUnlock();
     if (skipNextUnlock) {
@@ -1229,14 +1252,16 @@ class _AppEntryPointState extends State<AppEntryPoint> {
     final relockRequired = LocalSecurityService.relockRequired;
     final canUseTrustedUnlock = await LocalSecurityService.canUseTrustedUnlock()
         .timeout(const Duration(seconds: 1), onTimeout: () => false);
-    if (relockRequired && hasLocalSecurity) {
+    if (LocalSecurityService.mustUnlockBeforeContinuing(
+      hasLocalSecurity: hasLocalSecurity,
+      relockRequired: relockRequired,
+    )) {
       unawaited(RealtimeNotificationService.stop());
-      if (canUseTrustedUnlock) {
-        _debugLaunchDecision('unlock', stopwatch.elapsed);
-        return const _LaunchDecision(state: _LaunchState.unlock);
-      }
-      _debugLaunchDecision('home(relockUnavailable)', stopwatch.elapsed);
-      return const _LaunchDecision(state: _LaunchState.home);
+      _debugLaunchDecision(
+        canUseTrustedUnlock ? 'unlock' : 'unlock(localCredentialRequired)',
+        stopwatch.elapsed,
+      );
+      return const _LaunchDecision(state: _LaunchState.unlock);
     }
     if (!isOnline) {
       unawaited(RealtimeNotificationService.stop());
@@ -1325,17 +1350,14 @@ class _AppEntryPointState extends State<AppEntryPoint> {
     final hasLocalSecurity =
         await LocalSecurityService.hasConfiguredLocalSecurity().timeout(
           const Duration(seconds: 1),
-          onTimeout: () => false,
+          // Unknown lock state must not be treated as an unsecured account.
+          onTimeout: () => true,
         );
-    final canUseTrustedUnlock = await LocalSecurityService.canUseTrustedUnlock()
-        .timeout(const Duration(seconds: 1), onTimeout: () => false);
-    if (hasLocalSecurity &&
-        LocalSecurityService.relockRequired &&
-        canUseTrustedUnlock) {
+    if (LocalSecurityService.mustUnlockBeforeContinuing(
+      hasLocalSecurity: hasLocalSecurity,
+      relockRequired: LocalSecurityService.relockRequired,
+    )) {
       return const _LaunchDecision(state: _LaunchState.unlock);
-    }
-    if (hasLocalSecurity && LocalSecurityService.relockRequired) {
-      return const _LaunchDecision(state: _LaunchState.home);
     }
 
     if (!ConnectivityService.instance.isOnline.value) {

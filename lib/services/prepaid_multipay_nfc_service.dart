@@ -11,6 +11,8 @@ import 'package:nfc_manager/nfc_manager.dart';
 import 'package:nfc_manager/nfc_manager_android.dart';
 import 'package:nfc_manager_ndef/nfc_manager_ndef.dart';
 
+import 'secure_storage_config.dart';
+
 class PrepaidMultipayNfcPayload {
   const PrepaidMultipayNfcPayload({
     required this.cardNumber,
@@ -145,7 +147,7 @@ class PrepaidMultipayNfcPaymentReadResult extends PrepaidMultipayNfcReadResult {
 class PrepaidMultipayNfcService {
   const PrepaidMultipayNfcService();
 
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static const MethodChannel _hceChannel = MethodChannel(
     'com.alkmal.shwakil/hce',
   );

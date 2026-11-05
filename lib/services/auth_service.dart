@@ -12,6 +12,7 @@ import 'error_message_service.dart';
 import 'external_app_notification_service.dart';
 import 'local_security_service.dart';
 import 'network_client_service.dart';
+import 'secure_storage_config.dart';
 
 class OtpRequestResult {
   const OtpRequestResult({
@@ -75,7 +76,7 @@ class AuthService {
   static String? _cachedToken;
   static Map<String, dynamic>? _cachedUser;
   static String? _cachedRefreshToken;
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static Future<void>? _pendingRefreshCurrentUser;
   static Future<bool>? _pendingTrustedSessionRefresh;
   static int _sessionEpoch = 0;
@@ -406,10 +407,15 @@ class AuthService {
     if (response.statusCode >= 400) {
       throw _exceptionFromResponse(response.body);
     }
-    await _saveAuthPayload(
+    final saved = await _saveAuthPayload(
       jsonDecode(response.body) as Map<String, dynamic>,
       expectedEpoch: expectedEpoch,
     );
+    if (!saved) {
+      throw const AuthRequestException(
+        'تعذر حفظ جلسة الدخول في التخزين الآمن. تحقق من الاتصال الآمن ثم أعد المحاولة.',
+      );
+    }
   }
 
   Future<OtpRequestResult> requestDeviceSessionOtp() async {
@@ -427,7 +433,11 @@ class AuthService {
 
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     if ((body['token']?.toString() ?? '').isNotEmpty) {
-      await _saveAuthPayload(body, expectedEpoch: expectedEpoch);
+      if (!await _saveAuthPayload(body, expectedEpoch: expectedEpoch)) {
+        throw const AuthRequestException(
+          'تعذر حفظ جلسة الجهاز في التخزين الآمن. أعد المحاولة.',
+        );
+      }
     }
     return OtpRequestResult(
       message: body['message']?.toString(),
@@ -451,10 +461,15 @@ class AuthService {
     if (response.statusCode >= 400) {
       throw _exceptionFromResponse(response.body);
     }
-    await _saveAuthPayload(
+    final saved = await _saveAuthPayload(
       jsonDecode(response.body) as Map<String, dynamic>,
       expectedEpoch: expectedEpoch,
     );
+    if (!saved) {
+      throw const AuthRequestException(
+        'تعذر حفظ جلسة الجهاز في التخزين الآمن. أعد المحاولة.',
+      );
+    }
   }
 
   Future<bool> refreshTrustedDeviceSession() async {
@@ -573,8 +588,9 @@ class AuthService {
         if (candidate.raw.isEmpty) {
           continue;
         }
+        Map<String, dynamic> decodedUser;
         try {
-          _cachedUser = Map<String, dynamic>.from(
+          decodedUser = Map<String, dynamic>.from(
             jsonDecode(candidate.raw) as Map,
           );
         } catch (_) {
@@ -585,9 +601,15 @@ class AuthService {
           }
           continue;
         }
-        if (candidate.legacy && await _writeSecure(_userKey, candidate.raw)) {
+        if (candidate.legacy) {
+          if (!await _writeSecure(_userKey, candidate.raw)) {
+            await prefs.remove(_userKey);
+            await _deleteSecure(_userKey);
+            continue;
+          }
           await prefs.remove(_userKey);
         }
+        _cachedUser = decodedUser;
         return Map<String, dynamic>.from(_cachedUser!);
       }
       return null;
@@ -617,10 +639,13 @@ class AuthService {
         return null;
       }
 
-      _cachedToken = legacy;
-      if (await _writeSecure(_tokenKey, legacy)) {
+      if (!await _writeSecure(_tokenKey, legacy)) {
         await prefs.remove(_tokenKey);
+        await _deleteSecure(_tokenKey);
+        return null;
       }
+      await prefs.remove(_tokenKey);
+      _cachedToken = legacy;
       return legacy;
     });
   }
@@ -651,13 +676,13 @@ class AuthService {
           activeId != incomingId) {
         return;
       }
-      final prefs = await _prefs();
       _cachedUser = Map<String, dynamic>.from(user);
       final encoded = jsonEncode(user);
-      if (await _writeSecure(_userKey, encoded)) {
-        await prefs.remove(_userKey);
-      } else {
-        await prefs.setString(_userKey, encoded);
+      final prefs = await _prefs();
+      await prefs.remove(_userKey);
+      if (!await _writeSecure(_userKey, encoded)) {
+        // A failed overwrite can leave an older user's profile behind.
+        await _deleteSecure(_userKey);
       }
     });
   }
@@ -698,9 +723,10 @@ class AuthService {
         if (_cachedToken == normalized && operationEpoch == _sessionEpoch) {
           await prefs.remove(_tokenKey);
         }
-      } else if (_cachedToken == normalized &&
-          operationEpoch == _sessionEpoch) {
-        await prefs.setString(_tokenKey, normalized);
+      } else {
+        await prefs.remove(_tokenKey);
+        // Do not let a stale token be restored on the next app launch.
+        await _deleteSecure(_tokenKey);
       }
     });
   }
@@ -949,32 +975,36 @@ class AuthService {
           ? Map<String, dynamic>.from(payload['user'] as Map)
           : _cachedUser;
       final refreshToken = payload['refreshToken']?.toString().trim() ?? '';
+      final prefs = await _prefs();
+      final tokenStored = await _writeSecure(_tokenKey, nextToken);
+      final userStored = nextUser == null
+          ? await _deleteSecure(_userKey)
+          : await _writeSecure(_userKey, jsonEncode(nextUser));
+      final refreshTokenStored = refreshToken.isEmpty
+          ? await _deleteSecure(_refreshTokenKey)
+          : await _writeSecure(_refreshTokenKey, refreshToken);
+
+      if (!tokenStored || !userStored || !refreshTokenStored) {
+        await prefs.remove(_tokenKey);
+        await prefs.remove(_userKey);
+        await _deleteSecure(_tokenKey);
+        await _deleteSecure(_userKey);
+        await _deleteSecure(_refreshTokenKey);
+        _sessionEpoch++;
+        _cachedToken = null;
+        _cachedUser = null;
+        _cachedRefreshToken = null;
+        return false;
+      }
+
+      await prefs.remove(_tokenKey);
+      await prefs.remove(_userKey);
       _sessionEpoch++;
       _cachedToken = nextToken;
       _cachedUser = nextUser == null
           ? null
           : Map<String, dynamic>.from(nextUser);
-      if (refreshToken.isNotEmpty) {
-        _cachedRefreshToken = refreshToken;
-      }
-
-      final prefs = await _prefs();
-      if (await _writeSecure(_tokenKey, nextToken)) {
-        await prefs.remove(_tokenKey);
-      } else {
-        await prefs.setString(_tokenKey, nextToken);
-      }
-      if (nextUser != null) {
-        final encodedUser = jsonEncode(nextUser);
-        if (await _writeSecure(_userKey, encodedUser)) {
-          await prefs.remove(_userKey);
-        } else {
-          await prefs.setString(_userKey, encodedUser);
-        }
-      }
-      if (refreshToken.isNotEmpty) {
-        await _writeSecure(_refreshTokenKey, refreshToken);
-      }
+      _cachedRefreshToken = refreshToken.isNotEmpty ? refreshToken : null;
       return true;
     });
   }
@@ -1005,11 +1035,13 @@ class AuthService {
     }
   }
 
-  static Future<void> _deleteSecure(String key) async {
+  static Future<bool> _deleteSecure(String key) async {
     try {
       await _secureStorage.delete(key: key);
+      return true;
     } catch (_) {
-      // SharedPreferences fallback is still cleared on explicit logout.
+      // Callers that require secure revocation inspect the false result.
+      return false;
     }
   }
 

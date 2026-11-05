@@ -44,6 +44,7 @@ class TransferSecurityService {
     bool requireOtpAfterLocalAuth = false,
     bool allowOtpFallback = false,
     bool allowNoPhoneAccount = false,
+    String otpPurpose = 'transfer_security',
   }) async {
     final hasPin = await LocalSecurityService.hasPin();
     if (allowNoPhoneAccount && !hasPin) {
@@ -105,12 +106,13 @@ class TransferSecurityService {
         return _confirmWithOtp(
           context,
           introText: context.loc.tr('services_transfer_security_service.002'),
+          otpPurpose: otpPurpose,
         );
       }
       // A cancelled or unavailable PIN may use the explicitly enabled OTP
       // fallback, but never combine PIN and OTP for the same operation.
       if (!pinResult.isVerified && allowOtpFallback) {
-        return _confirmWithOtp(context);
+        return _confirmWithOtp(context, otpPurpose: otpPurpose);
       }
       return pinResult;
     }
@@ -124,7 +126,7 @@ class TransferSecurityService {
       return const TransferSecurityResult(isVerified: false);
     }
 
-    return _confirmWithOtp(context);
+    return _confirmWithOtp(context, otpPurpose: otpPurpose);
   }
 
   static Future<void> _showLocalSecurityRequiredDialog(
@@ -327,11 +329,15 @@ class TransferSecurityService {
   static Future<TransferSecurityResult> _confirmWithOtp(
     BuildContext context, {
     String? introText,
+    String otpPurpose = 'transfer_security',
   }) async {
     final result = await Navigator.of(context).push<TransferSecurityResult>(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => _TransferSecurityOtpScreen(introText: introText),
+        builder: (_) => _TransferSecurityOtpScreen(
+          introText: introText,
+          otpPurpose: otpPurpose,
+        ),
       ),
     );
     return result ?? const TransferSecurityResult(isVerified: false);
@@ -339,9 +345,13 @@ class TransferSecurityService {
 }
 
 class _TransferSecurityOtpScreen extends StatefulWidget {
-  const _TransferSecurityOtpScreen({this.introText});
+  const _TransferSecurityOtpScreen({
+    this.introText,
+    this.otpPurpose = 'transfer_security',
+  });
 
   final String? introText;
+  final String otpPurpose;
 
   @override
   State<_TransferSecurityOtpScreen> createState() =>
@@ -396,7 +406,9 @@ class _TransferSecurityOtpScreenState
       _errorText = null;
     });
     try {
-      final result = await _api.requestTransferSecurityOtp();
+      final result = await _api.requestTransferSecurityOtp(
+        purpose: widget.otpPurpose,
+      );
       if (!mounted) return;
       if (result.otpRequired == false) {
         Navigator.of(context).pop(

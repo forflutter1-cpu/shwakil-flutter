@@ -8,13 +8,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api_service.dart';
+import 'secure_storage_config.dart';
 
 class DebtBookService {
   static const _snapshotKeyPrefix = 'debt_book_snapshot_';
   static const _queueKeyPrefix = 'debt_book_queue_';
   static const _offlineKeyName = 'debt_book_aes_key_v1';
   static final AesGcm _cipher = AesGcm.with256bits();
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static const Uuid _uuid = Uuid();
   static final Map<String, Future<void>> _queueTails = {};
 

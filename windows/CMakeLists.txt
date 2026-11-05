@@ -1,10 +1,10 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(virtual_currency_cards LANGUAGES CXX)
+project(shwakil LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "virtual_currency_cards")
+set(BINARY_NAME "shwakil")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -56,6 +56,19 @@ add_subdirectory("runner")
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
+
+# flutter_secure_storage_windows uses ATL's narrow/wide string converters. The
+# build-tools install used by this project may omit ATL, so provide a small
+# Win32 conversion shim only when the ATL header is unavailable.
+if(TARGET flutter_secure_storage_windows_plugin)
+  include(CheckIncludeFileCXX)
+  check_include_file_cxx(atlstr.h SHWAKIL_HAS_ATLSTR_H)
+  if(NOT SHWAKIL_HAS_ATLSTR_H)
+    target_include_directories(flutter_secure_storage_windows_plugin BEFORE PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+    )
+  endif()
+endif()
 
 
 # === Installation ===

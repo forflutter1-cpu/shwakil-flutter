@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../localization/app_localization.dart';
+import 'secure_storage_config.dart';
 
 class LocalSecurityService {
   LocalSecurityService._();
@@ -31,7 +32,7 @@ class LocalSecurityService {
       'local_security_reminder_shown_at';
 
   static final LocalAuthentication _localAuth = LocalAuthentication();
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static const Uuid _uuid = Uuid();
   static final ValueNotifier<int> _securityStateVersion = ValueNotifier<int>(0);
   static final Sha256 _sha256 = Sha256();
@@ -79,6 +80,11 @@ class LocalSecurityService {
       _securityStateVersion;
   static bool get relockRequired => _relockRequired;
   static bool get securitySetupRequired => _securitySetupRequired;
+
+  static bool mustUnlockBeforeContinuing({
+    required bool hasLocalSecurity,
+    required bool relockRequired,
+  }) => hasLocalSecurity && relockRequired;
 
   static void _notifySecurityStateChanged() {
     _securityStateVersion.value++;
@@ -423,7 +429,6 @@ class LocalSecurityService {
         return changed;
       }
 
-      final canUseUnlock = await canUseTrustedUnlock();
       final relockTimeout = await relockTimeoutInSeconds();
       final lastUnlockAt = prefs.getInt(_lastLocalUnlockAtKey) ?? 0;
       final launchGraceSeconds = relockTimeout < 15 ? 15 : relockTimeout;
@@ -431,11 +436,11 @@ class LocalSecurityService {
           lastUnlockAt > 0 &&
           DateTime.now().millisecondsSinceEpoch - lastUnlockAt <
               Duration(seconds: launchGraceSeconds).inMilliseconds;
-      if (canUseUnlock && !recentlyUnlocked && !_relockRequired) {
+      if (!recentlyUnlocked && !_relockRequired) {
         _relockRequired = true;
         changed = true;
         _notifySecurityStateChanged();
-      } else if ((!canUseUnlock || recentlyUnlocked) && _relockRequired) {
+      } else if (recentlyUnlocked && _relockRequired) {
         _relockRequired = false;
         changed = true;
         _notifySecurityStateChanged();
@@ -458,11 +463,9 @@ class LocalSecurityService {
     }
     final relockTimeout = await relockTimeoutInSeconds();
     final elapsed = DateTime.now().millisecondsSinceEpoch - backgroundedAt;
-    final canUseUnlock = await canUseTrustedUnlock();
     final shouldRelock =
-        canUseUnlock &&
-        (forceOnNextLaunch ||
-            elapsed >= Duration(seconds: relockTimeout).inMilliseconds);
+        forceOnNextLaunch ||
+        elapsed >= Duration(seconds: relockTimeout).inMilliseconds;
     if (shouldRelock) {
       if (!_relockRequired) {
         _relockRequired = true;

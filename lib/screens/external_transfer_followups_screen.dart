@@ -25,8 +25,10 @@ class _ExternalTransferFollowupsScreenState
   final _api = ApiService();
   final _auth = AuthService();
   final _offline = ExternalTransferOfflineService();
+  final _nameSearchController = TextEditingController();
   List<Map<String, dynamic>> _rows = [];
   List<Map<String, dynamic>> _employees = [];
+  Map<String, dynamic> _deliveryStats = {};
   bool _loading = true;
   bool _canManage = false;
   bool _canCreate = false;
@@ -34,14 +36,28 @@ class _ExternalTransferFollowupsScreenState
   bool _canReview = false;
   bool _showFilters = false;
   String _status = 'all';
-  String _reviewed = 'all';
   String _employeeId = 'all';
   DateTime? _from;
   DateTime? _to;
   Timer? _liveRefresh;
+  Timer? _searchDebounce;
   bool _loadedOnce = false;
   bool _loadingRows = false;
+  bool _reloadAfterCurrent = false;
   String? _currentUserId;
+
+  List<Map<String, dynamic>> get _visibleRows {
+    final query = _nameSearchController.text.trim().toLowerCase();
+    if (query.isEmpty) return _rows;
+    return _rows.where((row) {
+      final searchable = [
+        row['beneficiary_name'],
+        row['beneficiary_mobile'],
+        row['source_app_name'],
+      ].whereType<Object>().join(' ').toLowerCase();
+      return searchable.contains(query);
+    }).toList();
+  }
 
   @override
   void initState() {
@@ -56,11 +72,24 @@ class _ExternalTransferFollowupsScreenState
   @override
   void dispose() {
     _liveRefresh?.cancel();
+    _searchDebounce?.cancel();
+    _nameSearchController.dispose();
     super.dispose();
   }
 
+  void _onNameSearchChanged(String value) {
+    setState(() {});
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (mounted) unawaited(_load(silent: true));
+    });
+  }
+
   Future<void> _load({bool silent = false}) async {
-    if (_loadingRows) return;
+    if (_loadingRows) {
+      _reloadAfterCurrent = true;
+      return;
+    }
     _loadingRows = true;
     if (!silent) setState(() => _loading = true);
     try {
@@ -87,17 +116,20 @@ class _ExternalTransferFollowupsScreenState
         await _offline.syncPending(userId: userId, api: _api);
       }
       final previous = {
-        for (final row in _rows)
-          '${row['id']}': '${row['delivery_status']}:${row['reviewed']}',
+        for (final row in _rows) '${row['id']}': '${row['delivery_status']}',
       };
       final filters = <String, String>{
         if (_from != null) 'from': _date(_from!),
         if (_to != null) 'to': _date(_to!),
         if (_status != 'all') 'status': _status,
-        if (_reviewed != 'all') 'reviewed': _reviewed,
         if (_employeeId != 'all') 'employeeId': _employeeId,
+        if (_nameSearchController.text.trim().isNotEmpty)
+          'search': _nameSearchController.text.trim(),
       };
       final cacheScope = jsonEncode(filters);
+      final unsearchedCacheScope = jsonEncode(
+        Map<String, String>.from(filters)..remove('search'),
+      );
       Map<String, dynamic> body;
       try {
         body = await _api.getExternalTransfers(filters: filters);
@@ -106,9 +138,16 @@ class _ExternalTransferFollowupsScreenState
         if (await ConnectivityService.instance.checkNow()) rethrow;
         body =
             await _offline.getSnapshot(userId, scope: cacheScope) ??
+            (_nameSearchController.text.trim().isNotEmpty
+                ? await _offline.getSnapshot(
+                    userId,
+                    scope: unsearchedCacheScope,
+                  )
+                : null) ??
             {
               'transfers': <dynamic>[],
               'employees': <dynamic>[],
+              'deliveryStats': <String, dynamic>{},
               'totals': <String, dynamic>{},
               'canCreate': _canCreate,
               'canManage': _canManage,
@@ -166,10 +205,18 @@ class _ExternalTransferFollowupsScreenState
               return false;
             }
             if (_status != 'all' && _status != 'pending') return false;
-            if (_reviewed == '1') return false;
             if (_employeeId != 'all' &&
                 '${row['assigned_user_id'] ?? userId}' != _employeeId) {
               return false;
+            }
+            final search = _nameSearchController.text.trim().toLowerCase();
+            if (search.isNotEmpty) {
+              final searchable = [
+                row['beneficiary_name'],
+                row['beneficiary_mobile'],
+                row['source_app_name'],
+              ].whereType<Object>().join(' ').toLowerCase();
+              if (!searchable.contains(search)) return false;
             }
             return true;
           })
@@ -188,6 +235,9 @@ class _ExternalTransferFollowupsScreenState
             (e) => Map<String, dynamic>.from(e as Map),
           ),
         );
+        _deliveryStats = Map<String, dynamic>.from(
+          body['deliveryStats'] as Map? ?? const {},
+        );
         _canCreate = body['canCreate'] == true;
         _isSubUser = body['isSubUser'] == true;
         _canManage = body['canManage'] == true;
@@ -196,9 +246,7 @@ class _ExternalTransferFollowupsScreenState
       });
       if (silent && _loadedOnce) {
         final changed = _rows.any(
-          (row) =>
-              previous['${row['id']}'] !=
-              '${row['delivery_status']}:${row['reviewed']}',
+          (row) => previous['${row['id']}'] != '${row['delivery_status']}',
         );
         if (changed && mounted) {
           AppAlertService.showSnack(
@@ -222,6 +270,10 @@ class _ExternalTransferFollowupsScreenState
       }
     } finally {
       _loadingRows = false;
+      if (_reloadAfterCurrent && mounted) {
+        _reloadAfterCurrent = false;
+        unawaited(_load(silent: true));
+      }
     }
   }
 
@@ -307,20 +359,6 @@ class _ExternalTransferFollowupsScreenState
     await _load();
   }
 
-  Future<void> _markDayReviewed() async {
-    if (!_canReview) return;
-    final pending = _rows
-        .where((r) => !(r['reviewed'] == true || r['reviewed'] == 1))
-        .toList();
-    for (final row in pending) {
-      await _api.updateExternalTransfer('${row['id']}', {
-        'deliveryStatus': row['delivery_status'] ?? 'pending',
-        'reviewed': true,
-      });
-    }
-    await _load();
-  }
-
   Future<void> _exportCsv() async {
     final excel = Excel.createExcel();
     const sheetName = 'التحويلات الخارجية';
@@ -334,13 +372,12 @@ class _ExternalTransferFollowupsScreenState
       'الجهة',
       'الحساب',
       'حالة الوصول',
-      'المراجعة',
       'بواسطة',
       'التاريخ',
       'مزامنة محلية',
     ];
     sheet.appendRow(headers.map(TextCellValue.new).toList());
-    for (final row in _rows) {
+    for (final row in _visibleRows) {
       final status = switch (row['delivery_status']?.toString()) {
         'arrived' => 'وصلت',
         'not_arrived' => 'لم تصل',
@@ -350,12 +387,16 @@ class _ExternalTransferFollowupsScreenState
         TextCellValue(row['beneficiary_name']?.toString() ?? ''),
         TextCellValue(row['beneficiary_mobile']?.toString() ?? ''),
         DoubleCellValue(double.tryParse('${row['amount']}') ?? 0),
-        TextCellValue(row['destination_name']?.toString() ?? ''),
+        TextCellValue(
+          row['record_type'] == 'app_notification'
+              ? 'إشعار: ${row['source_app_name'] ?? ''}'
+              : [
+                  _destinationTypeLabel(row['destination_type']?.toString()),
+                  row['destination_name']?.toString().trim() ?? '',
+                ].where((value) => value.isNotEmpty).join(' • '),
+        ),
         TextCellValue(row['destination_account']?.toString() ?? ''),
         TextCellValue(status),
-        TextCellValue(
-          row['reviewed'] == true || row['reviewed'] == 1 ? 'نعم' : 'لا',
-        ),
         TextCellValue(row['created_by_name']?.toString() ?? ''),
         TextCellValue(row['created_at']?.toString() ?? ''),
         TextCellValue(
@@ -510,11 +551,16 @@ class _ExternalTransferFollowupsScreenState
     }
   }
 
-  Future<void> _setReview(
-    Map<String, dynamic> row,
-    String status,
-    bool reviewed,
-  ) async {
+  Future<void> _setReview(Map<String, dynamic> row, String status) async {
+    if (row['delivery_status']?.toString() == 'arrived' &&
+        status != 'arrived') {
+      AppAlertService.showSnack(
+        context,
+        message: 'لا يمكن تغيير حالة حركة بعد تأكيد وصولها.',
+        type: AppAlertType.info,
+      );
+      return;
+    }
     if (row['offline_pending'] == true) {
       AppAlertService.showSnack(
         context,
@@ -526,7 +572,6 @@ class _ExternalTransferFollowupsScreenState
     try {
       await _api.updateExternalTransfer('${row['id']}', {
         'deliveryStatus': status,
-        'reviewed': reviewed,
       });
       await _load();
     } catch (e) {
@@ -535,6 +580,49 @@ class _ExternalTransferFollowupsScreenState
           context,
           title: 'تعذر التحديث',
           message: ErrorMessageService.sanitize(e),
+        );
+      }
+    }
+  }
+
+  Future<void> _changeTime(Map<String, dynamic> row) async {
+    if (row['offline_pending'] == true ||
+        row['delivery_status']?.toString() == 'arrived') {
+      return;
+    }
+    final current =
+        DateTime.tryParse('${row['created_at'] ?? ''}')?.toLocal() ??
+        DateTime.now();
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: current,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+    if (pickedDate == null || !mounted) return;
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(current),
+    );
+    if (pickedTime == null || !mounted) return;
+    final occurredAt = DateTime(
+      pickedDate.year,
+      pickedDate.month,
+      pickedDate.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+    try {
+      await _api.updateExternalTransfer('${row['id']}', {
+        'createdAt': occurredAt.toIso8601String(),
+      });
+      await _load();
+    } catch (error) {
+      if (mounted) {
+        AppAlertService.showError(
+          context,
+          title: 'تعذر تغيير وقت الحركة',
+          message: ErrorMessageService.sanitize(error),
         );
       }
     }
@@ -592,6 +680,100 @@ class _ExternalTransferFollowupsScreenState
         );
       }
     }
+  }
+
+  Widget _deliveryStatsCard() {
+    final transfers = _rows
+        .where((row) => row['record_type'] != 'app_notification')
+        .toList();
+    final arrived = transfers
+        .where((row) => row['delivery_status']?.toString() == 'arrived')
+        .toList();
+    final notArrived = transfers
+        .where((row) => row['delivery_status']?.toString() != 'arrived')
+        .toList();
+    double total(List<Map<String, dynamic>> rows) => rows.fold<double>(
+      0,
+      (sum, row) => sum + (double.tryParse('${row['amount']}') ?? 0),
+    );
+    final arrivedCount =
+        int.tryParse('${_deliveryStats['arrivedCount']}') ?? arrived.length;
+    final arrivedAmount =
+        double.tryParse('${_deliveryStats['arrivedAmount']}') ?? total(arrived);
+    final outstandingCount =
+        int.tryParse('${_deliveryStats['outstandingCount']}') ??
+        notArrived.length;
+    final outstandingAmount =
+        double.tryParse('${_deliveryStats['outstandingAmount']}') ??
+        total(notArrived);
+
+    Widget stat({
+      required String title,
+      required int count,
+      required double amount,
+      required IconData icon,
+      required Color color,
+    }) => Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: AppTheme.caption),
+                const SizedBox(height: 3),
+                Text(
+                  '$count حركة • ${amount.toStringAsFixed(2)} ₪',
+                  style: AppTheme.bodyBold,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < 600
+            ? constraints.maxWidth
+            : (constraints.maxWidth - 12) / 2;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            SizedBox(
+              width: width,
+              child: stat(
+                title: 'الحركات التي وصلت',
+                count: arrivedCount,
+                amount: arrivedAmount,
+                icon: Icons.check_circle_outline_rounded,
+                color: Colors.green,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: stat(
+                title: 'الحركات المعلقة أو التي لم تصل',
+                count: outstandingCount,
+                amount: outstandingAmount,
+                icon: Icons.schedule_rounded,
+                color: Colors.orange,
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -662,14 +844,10 @@ class _ExternalTransferFollowupsScreenState
                                     icon: const Icon(Icons.add),
                                     label: const Text('إضافة عملية'),
                                   ),
-                                if (_canReview)
-                                  OutlinedButton.icon(
-                                    onPressed: _markDayReviewed,
-                                    icon: const Icon(Icons.done_all),
-                                    label: const Text('اعتماد مراجعة الفترة'),
-                                  ),
                                 OutlinedButton.icon(
-                                  onPressed: _rows.isEmpty ? null : _exportCsv,
+                                  onPressed: _visibleRows.isEmpty
+                                      ? null
+                                      : _exportCsv,
                                   icon: const Icon(
                                     Icons.file_download_outlined,
                                   ),
@@ -725,117 +903,130 @@ class _ExternalTransferFollowupsScreenState
                           ),
                           if (_showFilters) ...[
                             const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 10,
-                              runSpacing: 8,
-                              children: [
-                                OutlinedButton.icon(
-                                  onPressed: () => _pickDate(true),
-                                  icon: const Icon(Icons.date_range),
-                                  label: Text(
-                                    _from == null ? 'من تاريخ' : _date(_from!),
-                                  ),
-                                ),
-                                OutlinedButton.icon(
-                                  onPressed: () => _pickDate(false),
-                                  icon: const Icon(Icons.event),
-                                  label: Text(
-                                    _to == null ? 'إلى تاريخ' : _date(_to!),
-                                  ),
-                                ),
-                                if (_from != null || _to != null)
-                                  TextButton(
-                                    onPressed: () {
-                                      setState(() {
-                                        _from = null;
-                                        _to = null;
-                                      });
-                                      _load();
-                                    },
-                                    child: const Text('مسح التاريخ'),
-                                  ),
-                                DropdownButton<String>(
-                                  value: _status,
-                                  items: const [
-                                    DropdownMenuItem(
-                                      value: 'all',
-                                      child: Text('كل الحالات'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: 'pending',
-                                      child: Text('قيد المتابعة'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: 'arrived',
-                                      child: Text('وصلت'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: 'not_arrived',
-                                      child: Text('لم تصل'),
-                                    ),
-                                  ],
-                                  onChanged: (v) {
-                                    if (v != null) {
-                                      setState(() => _status = v);
-                                      _load();
-                                    }
-                                  },
-                                ),
-                                DropdownButton<String>(
-                                  value: _reviewed,
-                                  items: const [
-                                    DropdownMenuItem(
-                                      value: 'all',
-                                      child: Text('كل المراجعات'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: '0',
-                                      child: Text('غير مراجعة'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: '1',
-                                      child: Text('تمت المراجعة'),
-                                    ),
-                                  ],
-                                  onChanged: (v) {
-                                    if (v != null) {
-                                      setState(() => _reviewed = v);
-                                      _load();
-                                    }
-                                  },
-                                ),
-                                if (!_isSubUser && _employees.length > 1)
-                                  DropdownButton<String>(
-                                    value: _employeeId,
-                                    hint: const Text('التابع / المنفذ'),
-                                    items: [
-                                      const DropdownMenuItem(
-                                        value: 'all',
-                                        child: Text('كل التابعين'),
-                                      ),
-                                      ..._employees.map(
-                                        (employee) => DropdownMenuItem(
-                                          value: '${employee['id']}',
-                                          child: Text(
-                                            employee['name']?.toString() ??
-                                                'مستخدم',
-                                          ),
+                            LayoutBuilder(
+                              builder: (context, constraints) => Wrap(
+                                spacing: 10,
+                                runSpacing: 8,
+                                children: [
+                                  SizedBox(
+                                    width: constraints.maxWidth < 560
+                                        ? constraints.maxWidth
+                                        : 280,
+                                    child: TextField(
+                                      controller: _nameSearchController,
+                                      textInputAction: TextInputAction.search,
+                                      decoration: InputDecoration(
+                                        labelText: 'بحث بالاسم',
+                                        hintText: 'اسم المستفيد أو رقم الجوال',
+                                        counterText: '',
+                                        prefixIcon: const Icon(
+                                          Icons.search_rounded,
                                         ),
+                                        suffixIcon:
+                                            _nameSearchController.text.isEmpty
+                                            ? null
+                                            : IconButton(
+                                                tooltip: 'مسح البحث',
+                                                onPressed: () {
+                                                  _nameSearchController.clear();
+                                                  _onNameSearchChanged('');
+                                                },
+                                                icon: const Icon(Icons.close),
+                                              ),
+                                      ),
+                                      maxLength: 100,
+                                      onChanged: _onNameSearchChanged,
+                                    ),
+                                  ),
+                                  OutlinedButton.icon(
+                                    onPressed: () => _pickDate(true),
+                                    icon: const Icon(Icons.date_range),
+                                    label: Text(
+                                      _from == null
+                                          ? 'من تاريخ'
+                                          : _date(_from!),
+                                    ),
+                                  ),
+                                  OutlinedButton.icon(
+                                    onPressed: () => _pickDate(false),
+                                    icon: const Icon(Icons.event),
+                                    label: Text(
+                                      _to == null ? 'إلى تاريخ' : _date(_to!),
+                                    ),
+                                  ),
+                                  if (_from != null || _to != null)
+                                    TextButton(
+                                      onPressed: () {
+                                        setState(() {
+                                          _from = null;
+                                          _to = null;
+                                        });
+                                        _load();
+                                      },
+                                      child: const Text('مسح التاريخ'),
+                                    ),
+                                  DropdownButton<String>(
+                                    value: _status,
+                                    items: const [
+                                      DropdownMenuItem(
+                                        value: 'all',
+                                        child: Text('كل الحالات'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'pending',
+                                        child: Text('قيد المتابعة'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'arrived',
+                                        child: Text('وصلت'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: 'not_arrived',
+                                        child: Text('لم تصل'),
                                       ),
                                     ],
                                     onChanged: (v) {
                                       if (v != null) {
-                                        setState(() => _employeeId = v);
+                                        setState(() => _status = v);
                                         _load();
                                       }
                                     },
                                   ),
-                              ],
+                                  if (!_isSubUser && _employees.length > 1)
+                                    DropdownButton<String>(
+                                      value: _employeeId,
+                                      hint: const Text('التابع / المنفذ'),
+                                      items: [
+                                        const DropdownMenuItem(
+                                          value: 'all',
+                                          child: Text('كل التابعين'),
+                                        ),
+                                        ..._employees.map(
+                                          (employee) => DropdownMenuItem(
+                                            value: '${employee['id']}',
+                                            child: Text(
+                                              employee['name']?.toString() ??
+                                                  'مستخدم',
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                      onChanged: (v) {
+                                        if (v != null) {
+                                          setState(() => _employeeId = v);
+                                          _load();
+                                        }
+                                      },
+                                    ),
+                                ],
+                              ),
                             ),
                           ],
                         ],
                       ),
                     ),
+                    const SizedBox(height: 12),
+                    _deliveryStatsCard(),
                     const SizedBox(height: 12),
                     if (_rows.isEmpty)
                       const ShwakelCard(
@@ -844,7 +1035,14 @@ class _ExternalTransferFollowupsScreenState
                           child: Text('لا توجد تحويلات خارجية مسجلة.'),
                         ),
                       ),
-                    ..._rows.map(_row),
+                    if (_rows.isNotEmpty && _visibleRows.isEmpty)
+                      const ShwakelCard(
+                        padding: EdgeInsets.all(24),
+                        child: Center(
+                          child: Text('لا توجد نتائج مطابقة للبحث.'),
+                        ),
+                      ),
+                    if (_visibleRows.isNotEmpty) _responsiveRows(_visibleRows),
                   ],
                 ),
               ),
@@ -852,21 +1050,239 @@ class _ExternalTransferFollowupsScreenState
     );
   }
 
-  Widget _row(Map<String, dynamic> row) {
-    final offlinePending = row['offline_pending'] == true;
-    final isAppNotification = row['record_type'] == 'app_notification';
+  Widget _responsiveRows(List<Map<String, dynamic>> rows) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 1000) {
+          return Column(children: rows.map(_row).toList());
+        }
+        return ShwakelCard(
+          padding: EdgeInsets.zero,
+          child: ClipRRect(
+            borderRadius: AppTheme.radiusMd,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowHeight: 48,
+                dataRowMinHeight: 68,
+                dataRowMaxHeight: 112,
+                columnSpacing: 22,
+                horizontalMargin: 18,
+                columns: const [
+                  DataColumn(label: Text('المستفيد / الإشعار')),
+                  DataColumn(label: Text('القيمة')),
+                  DataColumn(label: Text('الجهة والحساب')),
+                  DataColumn(label: Text('الحالة')),
+                  DataColumn(label: Text('التابع / أضيف بواسطة')),
+                  DataColumn(label: Text('التاريخ')),
+                  DataColumn(label: Text('إجراءات')),
+                ],
+                rows: rows.map(_transferDataRow).toList(),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  DataRow _transferDataRow(Map<String, dynamic> row) {
+    final isNotification = row['record_type'] == 'app_notification';
+    final name = isNotification
+        ? (row['source_app_name'] ?? row['beneficiary_name'] ?? 'إشعار تطبيق')
+              .toString()
+        : (row['beneficiary_name'] ?? '').toString();
+    final secondary = isNotification
+        ? (row['source_notification_title'] ??
+                  row['source_notification_message'] ??
+                  row['notes'] ??
+                  '')
+              .toString()
+        : (row['beneficiary_mobile'] ?? '').toString();
+    final type = _destinationTypeLabel(row['destination_type']?.toString());
+    final destinationName = row['destination_name']?.toString().trim() ?? '';
+    final destinationAccount =
+        row['destination_account']?.toString().trim() ?? '';
+    final destinationInfo = isNotification
+        ? 'إشعار: ${row['source_app_name'] ?? ''}'
+        : [
+            type,
+            if (destinationName.isNotEmpty) destinationName,
+            if (destinationAccount.isNotEmpty) destinationAccount,
+          ].join(' • ');
+    final assigned = row['assigned_to_name']?.toString().trim() ?? '';
+    final creator = row['created_by_name']?.toString().trim() ?? '';
+    final ownership = [
+      if (assigned.isNotEmpty) 'لـ: $assigned',
+      if (creator.isNotEmpty) 'أضافها: $creator',
+    ].join('\n');
     final status = row['delivery_status']?.toString() ?? 'pending';
-    final reviewed = row['reviewed'] == true || row['reviewed'] == 1;
-    final statusText = switch (status) {
+    final createdAt = DateTime.tryParse(
+      '${row['created_at'] ?? ''}',
+    )?.toLocal();
+    final actions = <Widget>[
+      if (_canManage && !isNotification)
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: 'تعديل',
+          onPressed: () => _edit(row),
+          icon: const Icon(Icons.edit_outlined, size: 19),
+        ),
+      if (_canManage)
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: 'حذف',
+          onPressed: () => _delete(row),
+          icon: const Icon(Icons.delete_outline, size: 19),
+        ),
+      if (_canReview && row['offline_pending'] != true && status != 'arrived')
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: 'تغيير تاريخ ووقت الحركة',
+          onPressed: () => _changeTime(row),
+          icon: const Icon(Icons.schedule_rounded, size: 19),
+        ),
+    ];
+
+    return DataRow(
+      cells: [
+        DataCell(
+          SizedBox(
+            width: 210,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                if (secondary.isNotEmpty)
+                  Text(
+                    secondary,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTheme.caption,
+                  ),
+              ],
+            ),
+          ),
+        ),
+        DataCell(
+          Text(
+            isNotification ? '—' : '${row['amount'] ?? 0} ₪',
+            style: AppTheme.bodyBold.copyWith(color: AppTheme.primary),
+          ),
+        ),
+        DataCell(
+          SizedBox(
+            width: 190,
+            child: Text(
+              destinationInfo,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+        DataCell(_statusControl(row, status)),
+        DataCell(
+          SizedBox(
+            width: 155,
+            child: Text(
+              ownership.isEmpty ? '—' : ownership,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AppTheme.caption,
+            ),
+          ),
+        ),
+        DataCell(
+          SizedBox(
+            width: 132,
+            child: Text(
+              createdAt == null ? '—' : _displayDateTime(createdAt),
+              maxLines: 1,
+            ),
+          ),
+        ),
+        DataCell(
+          SizedBox(
+            width: 120,
+            child: Row(mainAxisSize: MainAxisSize.min, children: actions),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statusControl(Map<String, dynamic> row, String status) {
+    final offlinePending = row['offline_pending'] == true;
+    if (!_canReview || offlinePending || status == 'arrived') {
+      return _statusBadge(status);
+    }
+    return PopupMenuButton<String>(
+      tooltip: 'تغيير الحالة',
+      onSelected: (value) => _setReview(row, value),
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'pending', child: Text('قيد المتابعة')),
+        PopupMenuItem(value: 'arrived', child: Text('وصلت')),
+        PopupMenuItem(value: 'not_arrived', child: Text('لم تصل')),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _statusBadge(status),
+          const Icon(Icons.arrow_drop_down_rounded),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusBadge(String status) {
+    final label = switch (status) {
       'arrived' => 'وصلت',
       'not_arrived' => 'لم تصل',
       _ => 'معلقة',
     };
-    final statusColor = switch (status) {
+    final color = switch (status) {
       'arrived' => Colors.green,
       'not_arrived' => Colors.red,
       _ => Colors.blue,
     };
+    return Chip(
+      avatar: Icon(
+        status == 'arrived'
+            ? Icons.check_circle
+            : status == 'not_arrived'
+            ? Icons.cancel
+            : Icons.schedule,
+        size: 16,
+        color: color,
+      ),
+      label: Text(
+        label,
+        style: TextStyle(color: color.shade700, fontWeight: FontWeight.w700),
+      ),
+      backgroundColor: color.withValues(alpha: 0.12),
+      side: BorderSide(color: color.withValues(alpha: 0.3)),
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+
+  String _destinationTypeLabel(String? value) => switch (value) {
+    'bank' => 'بنك',
+    'wallet' => 'محفظة',
+    'jawwal_pay' => 'جوال باي',
+    'palpay' => 'بال باي',
+    'cash' => 'نقدي',
+    _ => 'أخرى',
+  };
+
+  String _displayDateTime(DateTime value) =>
+      '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}  ${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+
+  Widget _row(Map<String, dynamic> row) {
+    final offlinePending = row['offline_pending'] == true;
+    final isAppNotification = row['record_type'] == 'app_notification';
+    final status = row['delivery_status']?.toString() ?? 'pending';
     final destinationDetails = [
       row['destination_name']?.toString().trim() ?? '',
       row['destination_account']?.toString().trim() ?? '',
@@ -880,136 +1296,169 @@ class _ExternalTransferFollowupsScreenState
     final attribution = [
       if (assigned.isNotEmpty) 'لـ: $assigned',
       if (creator.isNotEmpty) 'أضافها: $creator',
-      if (notes.isNotEmpty) notes,
     ].join(' • ');
+    final date = DateTime.tryParse(
+      '${isAppNotification ? row['source_notification_at'] ?? row['created_at'] : row['created_at'] ?? ''}',
+    )?.toLocal();
+    final actions = <Widget>[
+      if (_canManage && !isAppNotification)
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _edit(row),
+          icon: const Icon(Icons.edit_outlined),
+          tooltip: 'تعديل',
+        ),
+      if (_canManage)
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _delete(row),
+          icon: const Icon(Icons.delete_outline),
+          tooltip: 'حذف',
+        ),
+      if (_canReview && !offlinePending && status != 'arrived')
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _changeTime(row),
+          icon: const Icon(Icons.schedule_rounded),
+          tooltip: 'تغيير تاريخ ووقت الحركة',
+        ),
+    ];
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: ShwakelCard(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    isAppNotification
-                        ? 'إشعار تطبيق: ${row['source_app_name'] ?? row['beneficiary_name'] ?? ''}'
-                        : '${row['beneficiary_name'] ?? ''} — ${row['beneficiary_mobile'] ?? ''}',
-                    style: AppTheme.bodyBold,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isAppNotification
+                            ? 'إشعار تطبيق: ${row['source_app_name'] ?? row['beneficiary_name'] ?? ''}'
+                            : '${row['beneficiary_name'] ?? ''}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTheme.bodyBold,
+                      ),
+                      if (!isAppNotification &&
+                          '${row['beneficiary_mobile'] ?? ''}'.isNotEmpty)
+                        Text(
+                          '${row['beneficiary_mobile']}',
+                          style: AppTheme.caption,
+                        ),
+                    ],
                   ),
                 ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (!isAppNotification) ...[
-                      Text(
-                        '${row['amount'] ?? 0}',
-                        style: AppTheme.bodyBold.copyWith(
-                          fontSize: 18,
-                          color: AppTheme.primary,
-                        ),
-                      ),
-                      const Text(
-                        'القيمة',
-                        style: TextStyle(fontSize: 11, color: Colors.black54),
-                      ),
-                    ],
-                    const SizedBox(height: 4),
-                    Chip(
-                      avatar: Icon(
-                        status == 'arrived'
-                            ? Icons.check_circle
-                            : status == 'not_arrived'
-                            ? Icons.cancel
-                            : Icons.schedule,
-                        size: 16,
-                        color: statusColor,
-                      ),
-                      label: Text(
-                        statusText,
-                        style: TextStyle(
-                          color: statusColor.shade700,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      backgroundColor: statusColor.withValues(alpha: 0.12),
-                      side: BorderSide(
-                        color: statusColor.withValues(alpha: 0.35),
-                      ),
-                      visualDensity: VisualDensity.compact,
+                if (!isAppNotification) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    '${row['amount'] ?? 0} ₪',
+                    style: AppTheme.bodyBold.copyWith(
+                      fontSize: 16,
+                      color: AppTheme.primary,
                     ),
-                    if (offlinePending)
-                      const Chip(
-                        avatar: Icon(Icons.cloud_upload_outlined, size: 15),
-                        label: Text('بانتظار المزامنة'),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                  ],
-                ),
-                if (_canManage) ...[
-                  if (!isAppNotification)
-                    IconButton(
-                      onPressed: () => _edit(row),
-                      icon: const Icon(Icons.edit_outlined),
-                      tooltip: 'تعديل',
-                    ),
-                  IconButton(
-                    onPressed: () => _delete(row),
-                    icon: const Icon(Icons.delete_outline),
-                    tooltip: 'حذف',
                   ),
                 ],
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _statusBadge(status),
+                if (offlinePending)
+                  const Chip(
+                    avatar: Icon(Icons.cloud_upload_outlined, size: 15),
+                    label: Text('بانتظار المزامنة'),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                if (!isAppNotification)
+                  Chip(
+                    avatar: const Icon(
+                      Icons.account_balance_wallet_outlined,
+                      size: 16,
+                    ),
+                    label: Text(
+                      _destinationTypeLabel(
+                        row['destination_type']?.toString(),
+                      ),
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                if (!isAppNotification && date != null)
+                  Chip(
+                    avatar: const Icon(Icons.schedule_outlined, size: 15),
+                    label: Text(_displayDateTime(date)),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ...actions,
+              ],
+            ),
             if (isAppNotification) ...[
-              if ((row['source_notification_title'] ?? '')
-                  .toString()
-                  .isNotEmpty)
+              if ('${row['source_notification_title'] ?? ''}'.isNotEmpty) ...[
+                const SizedBox(height: 4),
                 Text(
                   '${row['source_notification_title']}',
                   style: AppTheme.bodyBold,
                 ),
+              ],
+              const SizedBox(height: 4),
               SelectableText(
                 (row['source_notification_message'] ?? row['notes'] ?? '')
                     .toString(),
+                maxLines: 4,
               ),
               Text(
-                'من ${row['created_by_name'] ?? ''} • ${row['source_notification_at'] ?? row['created_at'] ?? ''}',
+                [
+                  if (creator.isNotEmpty) 'من $creator',
+                  if (date != null) _displayDateTime(date),
+                ].join(' • '),
                 style: AppTheme.caption,
               ),
             ] else ...[
-              if (destinationDetails.isNotEmpty) Text(destinationDetails),
+              if (destinationDetails.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(destinationDetails),
+                ),
               if (attribution.isNotEmpty)
                 Text(attribution, style: AppTheme.caption),
+              if (notes.isNotEmpty)
+                Text(notes, maxLines: 2, overflow: TextOverflow.ellipsis),
             ],
-            if (_canReview && !offlinePending)
+            if (_canReview && !offlinePending && status != 'arrived') ...[
+              const Divider(height: 16),
               Wrap(
-                spacing: 8,
+                spacing: 6,
+                runSpacing: 4,
                 children: [
                   ChoiceChip(
                     label: const Text('قيد المتابعة'),
                     selected: status == 'pending',
-                    onSelected: (_) => _setReview(row, 'pending', reviewed),
+                    onSelected: (_) => _setReview(row, 'pending'),
                   ),
                   ChoiceChip(
                     label: const Text('وصلت'),
                     selected: status == 'arrived',
-                    onSelected: (_) => _setReview(row, 'arrived', true),
+                    onSelected: (_) => _setReview(row, 'arrived'),
                   ),
                   ChoiceChip(
                     label: const Text('لم تصل'),
                     selected: status == 'not_arrived',
-                    onSelected: (_) => _setReview(row, 'not_arrived', true),
-                  ),
-                  FilterChip(
-                    label: const Text('تمت المراجعة'),
-                    selected: reviewed,
-                    onSelected: (v) => _setReview(row, status, v),
+                    onSelected: (_) => _setReview(row, 'not_arrived'),
                   ),
                 ],
               ),
+            ],
           ],
         ),
       ),
@@ -1337,16 +1786,26 @@ class _ExternalTransferDialogState extends State<_ExternalTransferDialog> {
                   DropdownButtonFormField<String>(
                     initialValue: type,
                     decoration: const InputDecoration(labelText: 'الجهة *'),
-                    items: const [
-                      DropdownMenuItem(value: 'bank', child: Text('بنك')),
-                      DropdownMenuItem(value: 'wallet', child: Text('محفظة')),
-                      DropdownMenuItem(
+                    items: [
+                      const DropdownMenuItem(value: 'bank', child: Text('بنك')),
+                      if (widget.initial?['destination_type'] == 'wallet')
+                        const DropdownMenuItem(
+                          value: 'wallet',
+                          child: Text('محفظة (سابقاً)'),
+                        ),
+                      const DropdownMenuItem(
                         value: 'jawwal_pay',
                         child: Text('جوال باي'),
                       ),
-                      DropdownMenuItem(value: 'palpay', child: Text('بال باي')),
-                      DropdownMenuItem(value: 'cash', child: Text('كاش')),
-                      DropdownMenuItem(value: 'other', child: Text('أخرى')),
+                      const DropdownMenuItem(
+                        value: 'palpay',
+                        child: Text('بال باي'),
+                      ),
+                      const DropdownMenuItem(value: 'cash', child: Text('كاش')),
+                      const DropdownMenuItem(
+                        value: 'other',
+                        child: Text('أخرى'),
+                      ),
                     ],
                     onChanged: (value) =>
                         setState(() => type = value ?? 'bank'),

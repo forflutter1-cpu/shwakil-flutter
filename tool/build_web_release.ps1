@@ -10,16 +10,17 @@ if ($pubspec -notmatch '(?m)^version:\s*([^\s]+)') {
 }
 
 $releaseVersion = $Matches[1]
+$cacheVersion = '{0}-{1}' -f $releaseVersion, (Get-Date -Format 'yyyyMMddHHmmss')
 Push-Location $projectRoot
 try {
   flutter build web --release --base-href $BaseHref --no-pub
   $bootstrap = Join-Path $projectRoot 'build\web\flutter_bootstrap.js'
   $index = Join-Path $projectRoot 'build\web\index.html'
   $source = Get-Content $bootstrap -Raw
-  $source = $source.Replace('mainJsPath":"main.dart.js"', ('mainJsPath":"main.dart.js?v={0}"' -f $releaseVersion))
+  $source = $source.Replace('mainJsPath":"main.dart.js"', ('mainJsPath":"main.dart.js?v={0}"' -f $cacheVersion))
   Set-Content -LiteralPath $bootstrap -Value $source -NoNewline -Encoding utf8
   $indexSource = Get-Content $index -Raw
-  $indexSource = $indexSource.Replace('__WEB_RELEASE__', $releaseVersion)
+  $indexSource = $indexSource.Replace('__WEB_RELEASE__', $cacheVersion)
   Set-Content -LiteralPath $index -Value $indexSource -NoNewline -Encoding utf8
 } finally {
   Pop-Location

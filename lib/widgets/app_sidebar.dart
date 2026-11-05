@@ -16,16 +16,26 @@ class AppSidebar extends StatefulWidget {
   final bool embedded;
   final String? currentRouteName;
 
-  /// The desktop web shell already renders an embedded navigation rail.
+  /// The desktop shell already renders an embedded navigation rail.
   /// Returning null here prevents every page Scaffold from registering a
   /// second Drawer (and therefore a second sidebar/hamburger) at wide widths.
   static Widget? drawerFor(BuildContext context, {String? currentRouteName}) {
-    final isDesktopWeb =
-        kIsWeb && MediaQuery.sizeOf(context).width >= desktopBreakpoint;
-    return isDesktopWeb ? null : AppSidebar(currentRouteName: currentRouteName);
+    return usesPersistentNavigation(context)
+        ? null
+        : AppSidebar(currentRouteName: currentRouteName);
   }
 
   static const double desktopBreakpoint = 1100;
+
+  static bool get isDesktopPlatform =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.macOS);
+
+  static bool usesPersistentNavigation(BuildContext context) =>
+      (kIsWeb || isDesktopPlatform) &&
+      MediaQuery.sizeOf(context).width >= desktopBreakpoint;
 
   @override
   State<AppSidebar> createState() => _AppSidebarState();

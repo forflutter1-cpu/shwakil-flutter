@@ -2,11 +2,13 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'secure_storage_config.dart';
+
 class PrepaidMultipayOfflineCacheService {
   const PrepaidMultipayOfflineCacheService();
 
   static const String cacheKey = 'prepaid_multipay_cards_offline_cache_v1';
-  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static const FlutterSecureStorage _secureStorage = appSecureStorage;
 
   Future<void> save({
     required String ownerUserId,
