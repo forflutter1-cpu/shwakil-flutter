@@ -19,6 +19,16 @@ import 'network_client_service.dart';
 import 'phone_number_service.dart';
 import 'session_refreshing_http_client.dart';
 
+class ApiResponseException implements Exception {
+  const ApiResponseException(this.statusCode, this.message);
+
+  final int statusCode;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class ApiService {
   ApiService({http.Client? client, AuthService? authService})
     : _authService = authService ?? AuthService(),
@@ -583,7 +593,7 @@ class ApiService {
     required String fullName,
     required String username,
     required String password,
-    required Map<String, bool> permissions,
+    required Map<String, dynamic> permissions,
   }) async {
     final response = await _client.post(
       AppConfig.apiUri('sub-users'),
@@ -607,7 +617,7 @@ class ApiService {
     required String subUserId,
     required String fullName,
     String? password,
-    required Map<String, bool> permissions,
+    required Map<String, dynamic> permissions,
     bool isDisabled = false,
   }) async {
     final response = await _client.put(
@@ -3506,12 +3516,16 @@ class ApiService {
   Future<Map<String, dynamic>> getMaintenanceSnapshot({
     String search = '',
     String status = '',
+    int offset = 0,
+    int limit = 100,
   }) async {
     final response = await _client
         .get(
           AppConfig.apiUri('maintenance-management/snapshot', {
             if (search.trim().isNotEmpty) 'search': search.trim(),
             if (status.trim().isNotEmpty) 'status': status.trim(),
+            'offset': '$offset',
+            'limit': '$limit',
           }),
           headers: await _headers(),
         )
@@ -5235,7 +5249,7 @@ class ApiService {
     final payloadTooLargeMessage = _tr('services_api_service.002');
 
     if (response.statusCode == 413) {
-      throw Exception(payloadTooLargeMessage);
+      throw ApiResponseException(response.statusCode, payloadTooLargeMessage);
     }
 
     if (!contentType.contains('application/json') && looksLikeHtml) {
@@ -5259,17 +5273,20 @@ class ApiService {
 
     if (response.statusCode == 401) {
       final message = ErrorMessageService.sanitize(body['message']);
-      throw Exception(message);
+      throw ApiResponseException(response.statusCode, message);
     }
 
     if (response.statusCode == 403) {
-      throw Exception(ErrorMessageService.sanitize(body['message']));
+      throw ApiResponseException(
+        response.statusCode,
+        ErrorMessageService.sanitize(body['message']),
+      );
     }
 
     if (response.statusCode >= 400) {
       final message = ErrorMessageService.sanitize(body['message']);
       _reportApiFailure(response, message, responsePreview: rawBody);
-      throw Exception(message);
+      throw ApiResponseException(response.statusCode, message);
     }
 
     return body;

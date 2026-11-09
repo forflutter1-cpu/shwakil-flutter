@@ -36,13 +36,37 @@ class _MaintenanceManagementScreenState
   String? _userId;
   String _actorName = '';
   int _pendingCount = 0;
+  bool _hasRetryableMaintenancePending = false;
   bool _offline = false;
   bool _showFilters = false;
   bool _loadInProgress = false;
+  bool _loadQueued = false;
+  bool _loadingMore = false;
+  bool _loadMoreQueued = false;
   Timer? _syncRetryTimer;
   AppPermissions _appPermissions = AppPermissions.fromUser(null);
 
-  List<Map<String, dynamic>> get _orders => _list(_data['orders']);
+  List<Map<String, dynamic>> get _orders {
+    final query = _search.text.trim().toLowerCase();
+    return _list(_data['orders']).where((order) {
+      if (_status.isNotEmpty && order['status'] != _status) return false;
+      if (query.isEmpty) return true;
+      return [
+        'orderNumber',
+        'customerName',
+        'customerPhone',
+        'deviceType',
+        'brand',
+        'model',
+        'serialNumber',
+        'location',
+      ].any(
+        (field) =>
+            (order[field]?.toString() ?? '').toLowerCase().contains(query),
+      );
+    }).toList();
+  }
+
   List<Map<String, dynamic>> get _employees => _list(_data['employees']);
   List<Map<String, dynamic>> get _products => _list(_data['products']);
   List<Map<String, dynamic>> get _warehouses => _list(_data['warehouses']);
@@ -80,7 +104,7 @@ class _MaintenanceManagementScreenState
     _syncRetryTimer?.cancel();
     if (!mounted ||
         !ConnectivityService.instance.isOnline.value ||
-        _pendingCount == 0) {
+        !_hasRetryableMaintenancePending) {
       return;
     }
     _syncRetryTimer = Timer(const Duration(seconds: 20), () {
@@ -89,6 +113,15 @@ class _MaintenanceManagementScreenState
       }
     });
   }
+
+  bool _shouldAutomaticallyRetryMaintenance(
+    List<Map<String, dynamic>> pending,
+  ) => pending.any((operation) {
+    if (operation['entity'] != 'maintenance') return false;
+    if (operation['syncStatus'] != 'failed') return true;
+    return operation['syncOutcomeUnknown'] == true ||
+        operation['syncOutcomeUnknown'] == null;
+  });
 
   @override
   void dispose() {
@@ -121,7 +154,10 @@ class _MaintenanceManagementScreenState
   }
 
   Future<void> _load() async {
-    if (_loadInProgress) return;
+    if (_loadInProgress || _loadingMore) {
+      _loadQueued = true;
+      return;
+    }
     _loadInProgress = true;
     if (mounted) {
       setState(() {
@@ -143,22 +179,28 @@ class _MaintenanceManagementScreenState
       }
       final data = await _api.getMaintenanceSnapshot(
         search: _search.text,
-        status: _status,
+        // Cache the complete status set so status shortcuts remain useful
+        // without connectivity. Apply the selected state locally below.
+        status: '',
+        offset: 0,
+        limit: 100,
       );
-      if (_userId != null) {
-        await _offlineStore.cacheMaintenanceSnapshot(_userId!, data);
-      }
+      final visibleData = _userId == null
+          ? data
+          : await _offlineStore.cacheMaintenanceSnapshot(_userId!, data);
       final pending = _userId == null
           ? const <Map<String, dynamic>>[]
           : await _offlineStore.getPendingOperations(_userId!);
       if (mounted) {
         setState(() {
-          _data = data;
+          _data = visibleData;
           _loading = false;
           _offline = false;
           _pendingCount = pending
               .where((e) => e['entity'] == 'maintenance')
               .length;
+          _hasRetryableMaintenancePending =
+              _shouldAutomaticallyRetryMaintenance(pending);
         });
         _scheduleSyncRetry();
       }
@@ -177,12 +219,82 @@ class _MaintenanceManagementScreenState
           _pendingCount = pending
               .where((item) => item['entity'] == 'maintenance')
               .length;
+          _hasRetryableMaintenancePending =
+              _shouldAutomaticallyRetryMaintenance(pending);
           _error = cached.isEmpty ? ErrorMessageService.sanitize(e) : null;
         });
         _scheduleSyncRetry();
       }
     } finally {
       _loadInProgress = false;
+      if (_loadQueued && mounted) {
+        _loadQueued = false;
+        unawaited(_load());
+      } else if (_loadMoreQueued && mounted) {
+        _loadMoreQueued = false;
+        unawaited(_loadMore());
+      }
+    }
+  }
+
+  bool get _hasMore => _map(_data['pagination'])['hasMore'] == true;
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore || _userId == null) return;
+    if (_loadInProgress) {
+      _loadMoreQueued = true;
+      return;
+    }
+    final pagination = _map(_data['pagination']);
+    final offset =
+        ((pagination['offset'] as num?)?.toInt() ?? 0) +
+        ((pagination['pageCount'] as num?)?.toInt() ?? 0);
+    if (mounted) setState(() => _loadingMore = true);
+    try {
+      try {
+        await _offlineStore.syncPending(userId: _userId!, api: _api);
+        _syncError = null;
+      } catch (error) {
+        _syncError = ErrorMessageService.sanitize(error);
+      }
+      final page = await _api.getMaintenanceSnapshot(
+        search: _search.text,
+        status: '',
+        offset: offset,
+        limit: 100,
+      );
+      final merged = await _offlineStore.appendMaintenancePage(_userId!, page);
+      final pending = await _offlineStore.getPendingOperations(_userId!);
+      if (mounted) {
+        setState(() {
+          _data = merged;
+          _offline = false;
+          _pendingCount = pending
+              .where((operation) => operation['entity'] == 'maintenance')
+              .length;
+          _hasRetryableMaintenancePending =
+              _shouldAutomaticallyRetryMaintenance(pending);
+        });
+        _scheduleSyncRetry();
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _offline = true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(ErrorMessageService.sanitize(error))),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loadingMore = false);
+        if (_loadQueued) {
+          _loadQueued = false;
+          unawaited(_load());
+        } else if (_loadMoreQueued) {
+          _loadMoreQueued = false;
+          unawaited(_loadMore());
+        }
+      }
     }
   }
 
@@ -254,6 +366,10 @@ class _MaintenanceManagementScreenState
       child: Column(
         children: [
           if (_showFilters) ...[_header(), const SizedBox(height: 12)],
+          if (_syncError != null && _pendingCount > 0) ...[
+            _syncWarning(),
+            const SizedBox(height: 8),
+          ],
           TabBar(
             controller: _tabs,
             tabs: [
@@ -262,6 +378,8 @@ class _MaintenanceManagementScreenState
               Tab(text: context.loc.text('التقارير', 'Reports')),
             ],
           ),
+          const SizedBox(height: 8),
+          _statusShortcuts(),
           const SizedBox(height: 12),
           Expanded(
             child: _loading
@@ -278,12 +396,302 @@ class _MaintenanceManagementScreenState
     ),
   );
 
+  Widget _statusShortcuts() {
+    const statuses = [
+      '',
+      'received',
+      'diagnosing',
+      'waiting_customer',
+      'waiting_parts',
+      'in_progress',
+      'completed',
+      'delivered',
+      'cancelled',
+    ];
+    final counts = _map(_data['statusCounts']);
+    final allCount = counts.values.whereType<num>().fold<int>(
+      0,
+      (total, value) => total + value.toInt(),
+    );
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: statuses
+            .map(
+              (status) => Padding(
+                padding: const EdgeInsetsDirectional.only(end: 7),
+                child: ChoiceChip(
+                  label: Text(
+                    '${status.isEmpty ? context.loc.text('كل الحالات', 'All statuses') : _statusLabel(status)} (${status.isEmpty ? allCount : counts[status] ?? 0})',
+                  ),
+                  selected: _status == status,
+                  onSelected: (_) {
+                    setState(() => _status = status);
+                  },
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  Widget _syncWarning() => Material(
+    color: Theme.of(context).colorScheme.errorContainer,
+    borderRadius: BorderRadius.circular(12),
+    child: Padding(
+      padding: const EdgeInsetsDirectional.fromSTEB(14, 8, 6, 8),
+      child: Row(
+        children: [
+          const Icon(Icons.sync_problem_rounded),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              context.loc.text(
+                'تعذرت مزامنة $_pendingCount عملية. ستبقى محفوظة على هذا الجهاز. ${ErrorMessageService.sanitize(_syncError!)}',
+                '$_pendingCount operation(s) could not sync and remain saved on this device. ${ErrorMessageService.sanitize(_syncError!)}',
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: context.loc.text(
+              'تفاصيل العمليات المعلقة',
+              'Pending operation details',
+            ),
+            onPressed: _showPendingOperations,
+            icon: const Icon(Icons.list_alt_rounded),
+          ),
+          IconButton(
+            tooltip: context.loc.text('إعادة المحاولة', 'Retry sync'),
+            onPressed: _load,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Future<void> _showPendingOperations() async {
+    final userId = _userId;
+    if (userId == null) return;
+    final pending =
+        (await _offlineStore.getPendingOperations(
+            userId,
+          )).where((operation) => operation['entity'] == 'maintenance').toList()
+          ..sort(
+            (a, b) => (a['queueSequence'] as num? ?? 0).compareTo(
+              b['queueSequence'] as num? ?? 0,
+            ),
+          );
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text(
+          context.loc.text(
+            'عمليات الصيانة المعلقة',
+            'Pending maintenance operations',
+          ),
+        ),
+        content: SizedBox(
+          width: 560,
+          child: pending.isEmpty
+              ? Text(
+                  context.loc.text(
+                    'لا توجد عمليات معلقة.',
+                    'No pending operations.',
+                  ),
+                )
+              : ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: pending.length,
+                  separatorBuilder: (_, _) => const Divider(),
+                  itemBuilder: (context, index) {
+                    final operation = pending[index];
+                    final failed = operation['syncStatus'] == 'failed';
+                    final outcomeUnknown =
+                        operation['syncOutcomeUnknown'] == true;
+                    final opId = operation['opId']?.toString() ?? '';
+                    final title = _maintenanceActionLabel(
+                      operation['action']?.toString(),
+                    );
+                    final orderId = operation['orderId']?.toString();
+                    final orderClientRef = operation['orderClientRef']
+                        ?.toString();
+                    final order = _orders
+                        .where(
+                          (item) =>
+                              item['id']?.toString() == orderId ||
+                              item['clientRef']?.toString() == orderClientRef ||
+                              (operation['action'] == 'create' &&
+                                  item['clientRef']?.toString() ==
+                                      operation['clientRef']?.toString()),
+                        )
+                        .firstOrNull;
+                    final orderNumber = order?['orderNumber']?.toString();
+                    final rawError =
+                        operation['lastSyncError']?.toString() ?? '';
+                    final error = rawError.isEmpty
+                        ? ''
+                        : ErrorMessageService.sanitize(rawError);
+                    return ListTile(
+                      leading: Icon(
+                        failed
+                            ? Icons.error_outline_rounded
+                            : Icons.schedule_rounded,
+                      ),
+                      title: Text(
+                        '$title${orderNumber == null ? '' : ' • $orderNumber'}',
+                      ),
+                      subtitle: Text(
+                        failed && outcomeUnknown
+                            ? context.loc.text(
+                                'النتيجة غير مؤكدة بسبب انقطاع الاتصال. أعد المحاولة للتحقق بأمان. $error',
+                                'The connection ended before confirmation. Retry safely to check the result. $error',
+                              )
+                            : failed
+                            ? context.loc.text(
+                                'رفض الخادم العملية: $error',
+                                'The server rejected this operation: $error',
+                              )
+                            : context.loc.text(
+                                'بانتظار الاتصال أو دورها في الطابور.',
+                                'Waiting for connectivity or its turn in the queue.',
+                              ),
+                      ),
+                      trailing: failed && !outcomeUnknown
+                          ? IconButton(
+                              tooltip: context.loc.text(
+                                'إلغاء هذه العملية وما بعدها للطلب',
+                                'Discard this and later operations for the order',
+                              ),
+                              icon: const Icon(Icons.delete_outline_rounded),
+                              onPressed: () async {
+                                final discard = await showDialog<bool>(
+                                  context: context,
+                                  builder: (confirm) => AlertDialog(
+                                    title: Text(
+                                      context.loc.text(
+                                        'إلغاء العملية العالقة؟',
+                                        'Discard the stuck operation?',
+                                      ),
+                                    ),
+                                    content: Text(
+                                      context.loc.text(
+                                        'سيتم حذف العملية الفاشلة والعمليات الأحدث المرتبطة بالطلب نفسه من هذا الجهاز، ثم استعادة آخر حالة مؤكدة. لا يمكن التراجع عن ذلك.',
+                                        'The failed operation and newer queued operations for the same order will be removed from this device, then the last confirmed state will be restored. This cannot be undone.',
+                                      ),
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(confirm, false),
+                                        child: Text(
+                                          context.loc.text('رجوع', 'Keep them'),
+                                        ),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () =>
+                                            Navigator.pop(confirm, true),
+                                        child: Text(
+                                          context.loc.text(
+                                            'إلغاء العمليات',
+                                            'Discard operations',
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (discard != true || !dialog.mounted) return;
+                                try {
+                                  final removed = await _offlineStore
+                                      .discardFailedMaintenanceOperation(
+                                        userId: userId,
+                                        opId: opId,
+                                      );
+                                  if (!dialog.mounted) return;
+                                  Navigator.pop(dialog);
+                                  _showMessage(
+                                    context.loc.text(
+                                      'تمت إزالة $removed عملية محلية واستعادة آخر حالة مؤكدة.',
+                                      '$removed local operation(s) removed. The last confirmed state was restored.',
+                                    ),
+                                  );
+                                  final cached = await _offlineStore
+                                      .getMaintenanceSnapshot(userId);
+                                  final remaining = await _offlineStore
+                                      .getPendingOperations(userId);
+                                  if (mounted) {
+                                    setState(() {
+                                      _data = cached;
+                                      _pendingCount = remaining
+                                          .where(
+                                            (item) =>
+                                                item['entity'] == 'maintenance',
+                                          )
+                                          .length;
+                                      _hasRetryableMaintenancePending =
+                                          _shouldAutomaticallyRetryMaintenance(
+                                            remaining,
+                                          );
+                                      _syncError = null;
+                                    });
+                                    unawaited(_load());
+                                  }
+                                } catch (error) {
+                                  if (dialog.mounted) {
+                                    _showMessage(
+                                      ErrorMessageService.sanitize(error),
+                                    );
+                                  }
+                                }
+                              },
+                            )
+                          : null,
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: Text(context.loc.text('إغلاق', 'Close')),
+          ),
+          if (pending.isNotEmpty)
+            FilledButton.tonalIcon(
+              onPressed: () {
+                Navigator.pop(dialog);
+                _load();
+              },
+              icon: const Icon(Icons.sync_rounded),
+              label: Text(context.loc.text('إعادة المحاولة', 'Retry all')),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _maintenanceActionLabel(String? action) => switch (action) {
+    'create' => context.loc.text('استلام جهاز', 'Receive device'),
+    'update' => context.loc.text(
+      'تحديث الطلب أو حالته',
+      'Update order or status',
+    ),
+    'add_part' => context.loc.text('إضافة قطعة غيار', 'Add part'),
+    'remove_part' => context.loc.text('إرجاع قطعة للمخزن', 'Return part'),
+    'finalize' => context.loc.text('إنشاء الفاتورة', 'Create invoice'),
+    'contact' => context.loc.text('تسجيل التواصل', 'Record customer contact'),
+    _ => context.loc.text('عملية صيانة', 'Maintenance operation'),
+  };
+
   Widget _header() => ShwakelCard(
     padding: const EdgeInsets.all(14),
     child: Column(
       children: [
         TextField(
           controller: _search,
+          onChanged: (_) => setState(() {}),
           onSubmitted: (_) => _load(),
           decoration: InputDecoration(
             prefixIcon: const Icon(Icons.search),
@@ -292,44 +700,21 @@ class _MaintenanceManagementScreenState
               'Order, customer, phone, device, serial or location',
             ),
             suffixIcon: IconButton(
-              onPressed: _load,
-              icon: const Icon(Icons.arrow_forward_rounded),
+              onPressed: () {
+                if (_search.text.isEmpty) {
+                  _load();
+                } else {
+                  _search.clear();
+                  setState(() {});
+                  _load();
+                }
+              },
+              icon: Icon(
+                _search.text.isEmpty
+                    ? Icons.search_rounded
+                    : Icons.close_rounded,
+              ),
             ),
-          ),
-        ),
-        const SizedBox(height: 10),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children:
-                [
-                      '',
-                      'received',
-                      'diagnosing',
-                      'waiting_customer',
-                      'waiting_parts',
-                      'in_progress',
-                      'completed',
-                      'delivered',
-                    ]
-                    .map(
-                      (s) => Padding(
-                        padding: const EdgeInsetsDirectional.only(end: 8),
-                        child: ChoiceChip(
-                          label: Text(
-                            s.isEmpty
-                                ? context.loc.text('الكل', 'All')
-                                : _statusLabel(s),
-                          ),
-                          selected: _status == s,
-                          onSelected: (_) {
-                            setState(() => _status = s);
-                            _load();
-                          },
-                        ),
-                      ),
-                    )
-                    .toList(),
           ),
         ),
       ],
@@ -366,15 +751,62 @@ class _MaintenanceManagementScreenState
     ],
   );
 
-  Widget _ordersView() => _orders.isEmpty
-      ? Center(
-          child: Text(
-            context.loc.text('لا توجد صيانات مطابقة.', 'No matching orders.'),
+  Widget _ordersView() => ListView(
+    children: [
+      if (_map(_data['pagination'])['total'] is num)
+        Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(4, 0, 4, 8),
+          child: Builder(
+            builder: (context) {
+              final page = _map(_data['pagination']);
+              final loaded =
+                  ((page['offset'] as num?)?.toInt() ?? 0) +
+                  ((page['pageCount'] as num?)?.toInt() ?? 0);
+              return Text(
+                context.loc.text(
+                  'المحمّل $loaded من ${page['total']} نتيجة',
+                  '$loaded of ${page['total']} results loaded',
+                ),
+                style: Theme.of(context).textTheme.bodySmall,
+              );
+            },
+          ),
+        ),
+      if (_orders.isEmpty)
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: Text(
+              context.loc.text(
+                'لا توجد صيانات مطابقة في النتائج المحمّلة.',
+                'No matching orders in the loaded results.',
+              ),
+            ),
           ),
         )
-      : ListView(
-          children: [..._orders.map(_orderCard), const SizedBox(height: 80)],
-        );
+      else
+        ..._orders.map(_orderCard),
+      if (_hasMore)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 4, 0, 90),
+          child: Center(
+            child: OutlinedButton.icon(
+              onPressed: _loadingMore ? null : _loadMore,
+              icon: _loadingMore
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.expand_more_rounded),
+              label: Text(context.loc.text('تحميل المزيد', 'Load more')),
+            ),
+          ),
+        )
+      else
+        const SizedBox(height: 80),
+    ],
+  );
 
   Widget _reports() => !_canViewReports
       ? Center(
@@ -873,6 +1305,23 @@ class _MaintenanceManagementScreenState
               ],
             ),
             _statusChip(order['status']?.toString() ?? ''),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: _allowedNextStatuses(order)
+                  .where((status) => status != order['status'])
+                  .map(
+                    (status) => ActionChip(
+                      avatar: Icon(_statusIcon(status), size: 16),
+                      label: Text(
+                        '${context.loc.text('نقل إلى', 'Move to')} ${_statusLabel(status)}',
+                      ),
+                      onPressed: () => _quickChangeStatus(order, status, sheet),
+                    ),
+                  )
+                  .toList(),
+            ),
             const SizedBox(height: 10),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -894,6 +1343,19 @@ class _MaintenanceManagementScreenState
                     onPressed: () =>
                         _copy(order['customerPhone']?.toString() ?? ''),
                     icon: const Icon(Icons.copy),
+                  ),
+                  IconButton(
+                    tooltip: context.loc.text(
+                      'إرسال واتساب',
+                      'Message on WhatsApp',
+                    ),
+                    onPressed: () => _messageCustomer(order, 'whatsapp'),
+                    icon: const Icon(Icons.chat_rounded, color: Colors.green),
+                  ),
+                  IconButton(
+                    tooltip: context.loc.text('إرسال SMS', 'Send SMS'),
+                    onPressed: () => _messageCustomer(order, 'sms'),
+                    icon: const Icon(Icons.sms_outlined),
                   ),
                   IconButton(
                     tooltip: context.loc.text(
@@ -934,10 +1396,7 @@ class _MaintenanceManagementScreenState
                   ),
                   _reportValue(
                     context.loc.text('المتبقي', 'Due'),
-                    _money(
-                      ((order['total'] as num?)?.toDouble() ?? 0) -
-                          ((order['paidAmount'] as num?)?.toDouble() ?? 0),
-                    ),
+                    _money(order['dueAmount']),
                   ),
                   if (_canViewProfits)
                     _reportValue(
@@ -981,6 +1440,19 @@ class _MaintenanceManagementScreenState
                     icon: const Icon(Icons.receipt_long),
                     label: Text(
                       context.loc.text('إنشاء الفاتورة', 'Create invoice'),
+                    ),
+                  ),
+                if (_canCreateSales && order['invoiceId'] != null)
+                  OutlinedButton.icon(
+                    onPressed: () => _openMaintenanceInvoice(order),
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: Text(
+                      order['invoiceId'].toString().startsWith('local:')
+                          ? context.loc.text(
+                              'الفاتورة بانتظار المزامنة',
+                              'Invoice waiting to sync',
+                            )
+                          : context.loc.text('عرض الفاتورة', 'View invoice'),
                     ),
                   ),
               ],
@@ -1046,7 +1518,13 @@ class _MaintenanceManagementScreenState
                 title: Text(
                   '${_logLabel(l)} • ${_map(l['actor'])['name'] ?? ''}',
                 ),
-                subtitle: Text('${l['note'] ?? ''}\n${l['createdAt'] ?? ''}'),
+                subtitle: Text(
+                  [
+                    l['note']?.toString() ?? '',
+                    _logChanges(l),
+                    l['createdAt']?.toString() ?? '',
+                  ].where((line) => line.isNotEmpty).join('\n'),
+                ),
               ),
             ),
           ],
@@ -1055,9 +1533,13 @@ class _MaintenanceManagementScreenState
     );
   }
 
-  Future<void> _editOrder(Map<String, dynamic> order) async {
+  Future<void> _editOrder(
+    Map<String, dynamic> order, {
+    String? initialStatus,
+  }) async {
     final formKey = GlobalKey<FormState>();
-    String status = order['status']?.toString() ?? 'received';
+    final invoiced = order['invoiceId'] != null;
+    String status = initialStatus ?? order['status']?.toString() ?? 'received';
     String? employee = _map(order['assignedTo'])['id']?.toString();
     final diagnosis = TextEditingController(
           text: order['diagnosis']?.toString(),
@@ -1149,47 +1631,49 @@ class _MaintenanceManagementScreenState
                       context.loc.text('مكان الجهاز *', 'Device location *'),
                       required: true,
                     ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _field(
-                            labor,
-                            context.loc.text('أجرة العمل', 'Labor'),
-                            type: TextInputType.number,
-                          ),
-                        ),
-                        if (_canViewProfits) ...[
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _field(
-                              other,
-                              context.loc.text('تكلفة أخرى', 'Other cost'),
-                              type: TextInputType.number,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    if (_canCreateSales)
+                    if (!invoiced) ...[
                       Row(
                         children: [
                           Expanded(
                             child: _field(
-                              discount,
-                              context.loc.text('الخصم', 'Discount'),
+                              labor,
+                              context.loc.text('أجرة العمل', 'Labor'),
                               type: TextInputType.number,
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _field(
-                              paid,
-                              context.loc.text('المدفوع', 'Paid'),
-                              type: TextInputType.number,
+                          if (_canViewProfits) ...[
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _field(
+                                other,
+                                context.loc.text('تكلفة أخرى', 'Other cost'),
+                                type: TextInputType.number,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
+                      if (_canCreateSales)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _field(
+                                discount,
+                                context.loc.text('الخصم', 'Discount'),
+                                type: TextInputType.number,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _field(
+                                paid,
+                                context.loc.text('المدفوع', 'Paid'),
+                                type: TextInputType.number,
+                              ),
+                            ),
+                          ],
+                        ),
+                    ],
                     _field(
                       logNote,
                       context.loc.text('ملاحظة للسجل', 'Log note'),
@@ -1227,16 +1711,37 @@ class _MaintenanceManagementScreenState
             'diagnosis': diagnosis.text,
             'workNotes': notes.text,
             'location': location.text,
-            if (_canCreateSales) 'laborPrice': double.tryParse(labor.text) ?? 0,
-            if (_canViewProfits) 'otherCost': double.tryParse(other.text) ?? 0,
-            if (_canCreateSales)
+            if (!invoiced && _canCreateSales)
+              'laborPrice': double.tryParse(labor.text) ?? 0,
+            if (!invoiced && _canViewProfits)
+              'otherCost': double.tryParse(other.text) ?? 0,
+            if (!invoiced && _canCreateSales)
               'discount': double.tryParse(discount.text) ?? 0,
-            if (_canCreateSales) 'paidAmount': double.tryParse(paid.text) ?? 0,
+            if (!invoiced && _canCreateSales)
+              'paidAmount': double.tryParse(paid.text) ?? 0,
             'note': logNote.text,
           },
         ),
       );
     }
+  }
+
+  Future<void> _quickChangeStatus(
+    Map<String, dynamic> order,
+    String status,
+    BuildContext sheet,
+  ) async {
+    Navigator.pop(sheet);
+    final assignedTo = _map(order['assignedTo'])['id']?.toString() ?? '';
+    final diagnosis = order['diagnosis']?.toString().trim() ?? '';
+    if (['completed', 'delivered'].contains(status) &&
+        (assignedTo.isEmpty || diagnosis.isEmpty)) {
+      await _editOrder(order, initialStatus: status);
+      return;
+    }
+    await _act(
+      () => _queueMaintenance('update', order: order, data: {'status': status}),
+    );
   }
 
   Future<void> _addPart(Map<String, dynamic> order) async {
@@ -1621,10 +2126,16 @@ class _MaintenanceManagementScreenState
       data: preparedData,
     );
     final cached = await _offlineStore.getMaintenanceSnapshot(_userId!);
+    final pending = await _offlineStore.getPendingOperations(_userId!);
     if (mounted) {
       setState(() {
         _data = cached;
-        _pendingCount++;
+        _pendingCount = pending
+            .where((operation) => operation['entity'] == 'maintenance')
+            .length;
+        _hasRetryableMaintenancePending = _shouldAutomaticallyRetryMaintenance(
+          pending,
+        );
       });
     }
     return {'message': savedMessage};
@@ -1643,11 +2154,124 @@ class _MaintenanceManagementScreenState
               order: order,
               data: const {'method': 'call', 'result': 'attempted'},
             );
+            unawaited(_load());
           }
         } catch (_) {}
       }
       await launchUrl(Uri(scheme: 'tel', path: phone.trim()));
     }
+  }
+
+  Future<void> _messageCustomer(
+    Map<String, dynamic> order,
+    String method,
+  ) async {
+    final phone = order['customerPhone']?.toString().trim() ?? '';
+    if (phone.isEmpty) {
+      _showMessage(
+        context.loc.text(
+          'لا يوجد رقم هاتف للعميل.',
+          'Customer phone number is missing.',
+        ),
+      );
+      return;
+    }
+    final name = order['customerName']?.toString().trim() ?? '';
+    final orderNumber = order['orderNumber']?.toString() ?? '';
+    final status = _statusLabel(order['status']?.toString() ?? '');
+    final tracking = order['trackingUrl']?.toString().trim() ?? '';
+    final initialMessage = context.loc.text(
+      'مرحباً ${name.isEmpty ? '' : '$name، '}بخصوص طلب الصيانة $orderNumber: الحالة الحالية $status.${tracking.isEmpty ? '' : '\nللمتابعة: $tracking'}',
+      'Hello ${name.isEmpty ? '' : '$name, '}regarding maintenance order $orderNumber: current status is $status.${tracking.isEmpty ? '' : '\nTrack it here: $tracking'}',
+    );
+    final openFailureMessage = context.loc.text(
+      'تعذر فتح تطبيق المراسلة؛ نُسخت الرسالة لتتمكن من إرسالها يدوياً.',
+      'Could not open the messaging app. The message was copied so you can send it manually.',
+    );
+    final contactNote = context.loc.text(
+      'فُتح تطبيق المراسلة مع نص مُعدّ؛ لم يتم تأكيد الإرسال.',
+      'Messaging app opened with a prepared message; delivery was not confirmed.',
+    );
+    final openedMessage = context.loc.text(
+      'فُتح التطبيق بالرسالة. تأكد من الضغط على إرسال داخله؛ سجل الصيانة يوثق فتح التطبيق فقط.',
+      'The app opened with the message. Tap Send there; the maintenance log records only that the app was opened.',
+    );
+    final controller = TextEditingController(text: initialMessage);
+    final message = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text(
+          method == 'whatsapp'
+              ? context.loc.text('رسالة واتساب', 'WhatsApp message')
+              : context.loc.text('رسالة SMS', 'SMS message'),
+        ),
+        content: SizedBox(
+          width: 520,
+          child: TextField(
+            controller: controller,
+            minLines: 4,
+            maxLines: 8,
+            decoration: InputDecoration(
+              labelText: context.loc.text('نص الرسالة', 'Message'),
+              border: const OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: Text(context.loc.text('إلغاء', 'Cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text.trim()),
+            child: Text(context.loc.text('فتح التطبيق', 'Open app')),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (message == null || message.trim().isEmpty) return;
+
+    Uri uri;
+    if (method == 'whatsapp') {
+      var digits = phone.replaceAll(RegExp(r'\D'), '');
+      if (digits.startsWith('00')) digits = digits.substring(2);
+      if (digits.startsWith('0')) digits = '970${digits.substring(1)}';
+      uri = Uri.https('wa.me', '/$digits', {'text': message});
+    } else {
+      uri = Uri(scheme: 'sms', path: phone, queryParameters: {'body': message});
+    }
+
+    var opened = false;
+    try {
+      opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    if (!opened) {
+      await Clipboard.setData(ClipboardData(text: message));
+      _showMessage(openFailureMessage);
+      return;
+    }
+    try {
+      await _queueMaintenance(
+        'contact',
+        order: order,
+        data: {'method': method, 'result': 'attempted', 'note': contactNote},
+      );
+      unawaited(_load());
+    } catch (_) {
+      // The message handoff succeeded. A local recording failure should not
+      // imply that the message was sent or prevent the customer contact.
+    }
+    _showMessage(openedMessage);
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _copyTracking(String url) async {
@@ -1664,6 +2288,56 @@ class _MaintenanceManagementScreenState
           ),
         ),
       );
+    }
+  }
+
+  Future<void> _openMaintenanceInvoice(Map<String, dynamic> order) async {
+    final invoiceId = order['invoiceId']?.toString() ?? '';
+    if (invoiceId.startsWith('local:')) {
+      _showMessage(
+        context.loc.text(
+          'الفاتورة محفوظة محلياً؛ ستظهر هنا بعد اكتمال المزامنة.',
+          'The invoice is saved locally and will be available here after sync.',
+        ),
+      );
+      return;
+    }
+    final userId = _userId;
+    if (userId == null) return;
+    final invoiceNotFoundMessage = context.loc.text(
+      'تعذر العثور على رابط الفاتورة. حدّث القائمة بعد اكتمال المزامنة.',
+      'Invoice link is not available yet. Refresh after sync completes.',
+    );
+    final openFailedMessage = context.loc.text(
+      'تعذر فتح الفاتورة؛ تم نسخ رابطها.',
+      'Could not open the invoice. Its link was copied.',
+    );
+    try {
+      var snapshot = await _offlineStore.getSnapshot(userId);
+      var invoice = _list(
+        snapshot['invoices'],
+      ).where((item) => item['id']?.toString() == invoiceId).firstOrNull;
+      if (invoice == null && ConnectivityService.instance.isOnline.value) {
+        snapshot = await _offlineStore.refresh(userId: userId, api: _api);
+        invoice = _list(
+          snapshot['invoices'],
+        ).where((item) => item['id']?.toString() == invoiceId).firstOrNull;
+      }
+      final shareUrl = invoice?['shareUrl']?.toString().trim() ?? '';
+      if (shareUrl.isEmpty) {
+        _showMessage(invoiceNotFoundMessage);
+        return;
+      }
+      final opened = await launchUrl(
+        Uri.parse(shareUrl),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        await Clipboard.setData(ClipboardData(text: shareUrl));
+        _showMessage(openFailedMessage);
+      }
+    } catch (error) {
+      _showMessage(ErrorMessageService.sanitize(error));
     }
   }
 
@@ -1710,15 +2384,67 @@ class _MaintenanceManagementScreenState
     final next = transitions[current] is List
         ? List<String>.from(transitions[current] as List)
         : const <String>[];
+    if (order['invoiceId'] == null) next.remove('delivered');
     return {current, ...next}.toList();
   }
 
   Future<void> _exportCsv() async {
+    if (_hasMore && !ConnectivityService.instance.isOnline.value) {
+      _showMessage(
+        context.loc.text(
+          'اتصل بالإنترنت لتحميل السجل الكامل قبل التصدير.',
+          'Connect to load the full maintenance history before exporting.',
+        ),
+      );
+      return;
+    }
+    final exportOrders = <Map<String, dynamic>>[];
+    var offset = 0;
+    var hasMore = true;
+    try {
+      while (hasMore) {
+        final page = await _api.getMaintenanceSnapshot(
+          search: _search.text,
+          status: '',
+          offset: offset,
+          limit: 500,
+        );
+        exportOrders.addAll(
+          _list(
+            page['orders'],
+          ).where((order) => _status.isEmpty || order['status'] == _status),
+        );
+        final pagination = _map(page['pagination']);
+        final pageCount = (pagination['pageCount'] as num?)?.toInt() ?? 0;
+        offset += pageCount;
+        hasMore = pagination['hasMore'] == true && pageCount > 0;
+      }
+    } catch (error) {
+      _showMessage(ErrorMessageService.sanitize(error));
+      return;
+    }
+    for (final localOrder in _list(
+      _data['orders'],
+    ).where((order) => order['pendingSync'] == true)) {
+      if (_status.isNotEmpty && localOrder['status'] != _status) continue;
+      final index = exportOrders.indexWhere(
+        (serverOrder) =>
+            serverOrder['id']?.toString() == localOrder['id']?.toString() ||
+            (localOrder['clientRef'] != null &&
+                serverOrder['clientRef']?.toString() ==
+                    localOrder['clientRef']?.toString()),
+      );
+      if (index >= 0) {
+        exportOrders[index] = localOrder;
+      } else {
+        exportOrders.insert(0, localOrder);
+      }
+    }
     final buffer = StringBuffer()
       ..writeln(
         '\uFEFForder_number,status,priority,customer_name,customer_phone,device_type,brand,model,serial_number,location,technician,total,paid,due,created_at',
       );
-    for (final order in _orders) {
+    for (final order in exportOrders) {
       final row = [
         order['orderNumber'],
         _statusLabel(order['status']?.toString() ?? ''),
@@ -1790,17 +2516,29 @@ class _MaintenanceManagementScreenState
       v is Map ? Map<String, dynamic>.from(v) : const {};
   String _statusLabel(String s) =>
       {
-        'received': 'مستلمة',
-        'diagnosing': 'قيد الفحص',
-        'waiting_customer': 'بانتظار العميل',
-        'waiting_parts': 'بانتظار قطع',
-        'in_progress': 'قيد الصيانة',
-        'completed': 'جاهزة للتسليم',
-        'delivered': 'تم التسليم',
-        'cancelled': 'ملغاة',
+        'received': context.loc.text('مستلمة', 'Received'),
+        'diagnosing': context.loc.text('قيد الفحص', 'Diagnosing'),
+        'waiting_customer': context.loc.text(
+          'بانتظار العميل',
+          'Waiting for customer',
+        ),
+        'waiting_parts': context.loc.text('بانتظار قطع', 'Waiting for parts'),
+        'in_progress': context.loc.text('قيد الصيانة', 'In progress'),
+        'completed': context.loc.text('جاهزة للتسليم', 'Ready for pickup'),
+        'delivered': context.loc.text('تم التسليم', 'Delivered'),
+        'cancelled': context.loc.text('ملغاة', 'Cancelled'),
       }[s] ??
       (s.isEmpty ? '-' : s);
   String _logLabel(Map<String, dynamic> log) {
+    if (log['action'] == 'created') {
+      return context.loc.text('استلام الجهاز', 'Device received');
+    }
+    if (log['action'] == 'updated') {
+      return context.loc.text('تعديل بيانات الصيانة', 'Maintenance updated');
+    }
+    if (log['action'] == 'status_changed') {
+      return context.loc.text('تغيير الحالة', 'Status changed');
+    }
     if (log['action'] == 'customer_contacted') {
       return context.loc.text('تم التواصل مع العميل', 'Customer contacted');
     }
@@ -1814,6 +2552,73 @@ class _MaintenanceManagementScreenState
       return context.loc.text('إنشاء الفاتورة', 'Invoice created');
     }
     return _statusLabel(log['toStatus']?.toString() ?? '');
+  }
+
+  String _logChanges(Map<String, dynamic> log) {
+    final lines = <String>[];
+    if (log['action'] == 'status_changed') {
+      final from = log['fromStatus']?.toString() ?? '';
+      final to = log['toStatus']?.toString() ?? '';
+      if (to.isNotEmpty) {
+        lines.add(
+          context.loc.text(
+            'الحالة: ${from.isEmpty ? '—' : _statusLabel(from)} ← ${_statusLabel(to)}',
+            'Status: ${from.isEmpty ? '—' : _statusLabel(from)} → ${_statusLabel(to)}',
+          ),
+        );
+      }
+    }
+    final changes = _map(_map(log['metadata'])['changes']);
+    lines.addAll(
+      changes.entries.map((entry) {
+        final values = _map(entry.value);
+        return '${_logFieldLabel(entry.key)}: ${_logValue(entry.key, values['from'])} → ${_logValue(entry.key, values['to'])}';
+      }),
+    );
+    return lines.join('\n');
+  }
+
+  String _logFieldLabel(String field) =>
+      {
+        'location': context.loc.text('الموقع', 'Location'),
+        'diagnosis': context.loc.text('التشخيص', 'Diagnosis'),
+        'workNotes': context.loc.text('ملاحظات العمل', 'Work notes'),
+        'customerNotes': context.loc.text('ملاحظات العميل', 'Customer notes'),
+        'assignedToUserId': context.loc.text(
+          'الفني المسؤول',
+          'Assigned technician',
+        ),
+        'laborPrice': context.loc.text('أجرة العمل', 'Labor charge'),
+        'otherCost': context.loc.text('تكلفة أخرى', 'Other cost'),
+        'discount': context.loc.text('الخصم', 'Discount'),
+        'paidAmount': context.loc.text('المبلغ المدفوع', 'Amount paid'),
+        'estimatedCost': context.loc.text(
+          'التكلفة التقديرية',
+          'Estimated cost',
+        ),
+      }[field] ??
+      field;
+
+  String _logValue(String field, dynamic value) {
+    if (value == null || value.toString().isEmpty) {
+      return context.loc.text('—', '—');
+    }
+    if (field == 'assignedToUserId') {
+      final employee = _employees
+          .where((item) => item['id']?.toString() == value.toString())
+          .firstOrNull;
+      return employee?['name']?.toString() ?? value.toString();
+    }
+    if ({
+      'laborPrice',
+      'otherCost',
+      'discount',
+      'paidAmount',
+      'estimatedCost',
+    }.contains(field)) {
+      return _money(num.tryParse(value.toString()) ?? 0);
+    }
+    return value.toString();
   }
 
   String _contactMethodLabel(String? method) => switch (method) {

@@ -70,6 +70,17 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
   String _partySearchQuery = '';
 
   AppPermissions get _permissions => AppPermissions.fromUser(_user);
+  Map<String, dynamic> get _storePolicy =>
+      Map<String, dynamic>.from(_snapshot['permissions'] as Map? ?? const {});
+  bool get _canOverrideSalePrice =>
+      _permissions.canEditStorePrices ||
+      _storePolicy['canOverrideStoreSalePrice'] == true;
+  bool get _canApplyInvoiceDiscount =>
+      _permissions.canEditStorePrices ||
+      _storePolicy['canApplyStoreDiscount'] == true;
+  double get _maximumDiscountPercent => _permissions.canEditStorePrices
+      ? 100
+      : (_storePolicy['storeMaxDiscountPercent'] as num?)?.toDouble() ?? 0;
   String get _userId => _user?['id']?.toString() ?? '';
   String get _actorName =>
       _user?['fullName']?.toString().trim().isNotEmpty == true
@@ -1808,11 +1819,26 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     bool quickSale = false,
     String? initialType,
   }) async {
+    final l = context.loc;
     unawaited(prepareCashierSound());
     String invoiceType = quickSale
         ? 'sale'
         : initialType ??
               (_permissions.canCreateStoreSales ? 'sale' : 'purchase');
+    final requiresServerApproval =
+        invoiceType == 'sale' && _permissions.isSubUser;
+    if (requiresServerApproval) {
+      final pendingInvoices = await _store.getPendingOperations(_userId);
+      if (pendingInvoices.any(
+        (operation) =>
+            operation['entity'] == 'invoice' &&
+            operation['invoiceType'] == 'sale',
+      )) {
+        throw StateError(
+          'هناك عملية بيع لم يؤكدها الخادم بعد. أعد المزامنة أو راجع العمليات المعلقة قبل تسجيل بيع آخر.',
+        );
+      }
+    }
     final generalCustomer = _parties.where((party) {
       final type = party['type']?.toString();
       final name = _normalizeSearch(party['name']?.toString() ?? '');
@@ -1977,7 +2003,6 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
       return null;
     }
 
-    final l = context.loc;
     final accepted = await _openFullScreenForm(
       title: quickSale
           ? l.text('البيع السريع', 'Quick sale')
@@ -2022,7 +2047,9 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         return lines.isNotEmpty &&
             stockValidationMessages().isEmpty &&
             (invoiceType != 'sale' ||
-                _permissions.canEditStorePrices ||
+                (_canApplyInvoiceDiscount &&
+                    discountValue <=
+                        subtotal * _maximumDiscountPercent / 100 + 0.009) ||
                 discountValue == 0) &&
             (!quickSale || (paymentStatus == 'paid' && discountValue == 0)) &&
             (paymentStatus == 'debt' || paymentMethodId != null) &&
@@ -2104,8 +2131,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                       ),
                     )
                     .toList(),
-                onChanged: (value) =>
-                    setDialogState(() => warehouseId = value),
+                onChanged: (value) => setDialogState(() => warehouseId = value),
               ),
             if (!quickSale && _warehouses.isEmpty)
               Container(
@@ -2144,7 +2170,10 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                   decoration: InputDecoration(
                     labelText: invoiceType == 'sale'
                         ? paymentStatus == 'paid'
-                              ? l.text('الزبون (اختياري)', 'Customer (optional)')
+                              ? l.text(
+                                  'الزبون (اختياري)',
+                                  'Customer (optional)',
+                                )
                               : l.text(
                                   'الزبون مطلوب للبيع الآجل',
                                   'Customer required for a balance due',
@@ -2528,8 +2557,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                     } else {
                       partyId = null;
                     }
-                    if (invoiceType == 'sale' &&
-                        !_permissions.canEditStorePrices) {
+                    if (invoiceType == 'sale' && !_canApplyInvoiceDiscount) {
                       discount.text = '0';
                     }
                     refreshPricesForType();
@@ -2581,57 +2609,57 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                   label: Text(l.text('تعديل حد الدين', 'Edit credit limit')),
                 ),
               ),
-            OutlinedButton.icon(
-              onPressed: () async {
-                final selected = await _pickStoreEntry(
-                  title: l.text('اختيار المنتج', 'Choose product'),
-                  entries: _products,
-                  searchHint: l.text(
-                    'ابحث بالاسم أو الباركود',
-                    'Search by name or barcode',
-                  ),
-                  addLabel: l.text('إضافة منتج جديد', 'Add new product'),
-                  onAdd: _addProduct,
-                );
-                if (selected != null) {
-                  setDialogState(() {
-                    addLine(selected, firstUnit(selected));
-                  });
-                }
-              },
-              icon: const Icon(Icons.add_shopping_cart_rounded),
-              label: Text(l.text('بحث وإضافة منتج', 'Search and add product')),
-            ),
-            if (invoiceType == 'purchase' ||
-                (quickSale &&
-                    invoiceType == 'sale' &&
-                    _permissions.canEditStorePrices)) ...[
-              const SizedBox(height: 8),
-              FilledButton.tonalIcon(
-                onPressed: () => addManualInvoiceLine(setDialogState),
-                icon: const Icon(Icons.add_box_outlined),
-                label: Text(
-                  invoiceType == 'purchase'
-                      ? l.text(
-                          'إضافة صنف جديد للشراء',
-                          'Add a new purchase item',
-                        )
-                      : l.text('بيع صنف غير مسجل', 'Sell an unlisted item'),
-                ),
-              ),
-            ],
-            const SizedBox(height: 8),
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: Text(
-                l.text(
-                  'F2 بحث • F4 قراءة باركود • ↑↓ للتنقل • Enter للإضافة • F6 حفظ',
-                  'F2 search • F4 barcode • ↑↓ navigate • Enter add • F6 save',
-                ),
-                style: AppTheme.caption.copyWith(color: AppTheme.textSecondary),
-              ),
+            Text(
+              l.text('إضافة الأصناف', 'Add items'),
+              style: AppTheme.bodyBold,
             ),
             const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final selected = await _pickStoreEntry(
+                      title: l.text('اختيار المنتج', 'Choose product'),
+                      entries: _products,
+                      searchHint: l.text(
+                        'ابحث بالاسم أو الباركود',
+                        'Search by name or barcode',
+                      ),
+                      addLabel: l.text('إضافة منتج جديد', 'Add new product'),
+                      onAdd: _addProduct,
+                    );
+                    if (selected != null) {
+                      setDialogState(() {
+                        addLine(selected, firstUnit(selected));
+                      });
+                    }
+                  },
+                  icon: const Icon(Icons.add_shopping_cart_rounded),
+                  label: Text(l.text('اختيار صنف', 'Choose item')),
+                ),
+                if (invoiceType == 'purchase' ||
+                    (quickSale &&
+                        invoiceType == 'sale' &&
+                        _permissions.canEditStorePrices))
+                  FilledButton.tonalIcon(
+                    onPressed: () => addManualInvoiceLine(setDialogState),
+                    icon: const Icon(Icons.add_box_outlined),
+                    label: Text(
+                      invoiceType == 'purchase'
+                          ? l.text('إضافة صنف جديد للشراء', 'New purchase item')
+                          : l.text('بيع صنف غير مسجل', 'Sell unlisted item'),
+                    ),
+                  ),
+                OutlinedButton.icon(
+                  onPressed: scanIntoInvoice,
+                  icon: const Icon(Icons.qr_code_scanner_rounded),
+                  label: Text(l.text('مسح باركود', 'Scan barcode')),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             Autocomplete<Map<String, dynamic>>(
               displayStringForOption: (option) {
                 final product = Map<String, dynamic>.from(
@@ -2807,12 +2835,6 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                 ),
               ),
             ],
-            const SizedBox(height: 8),
-            FilledButton.tonalIcon(
-              onPressed: scanIntoInvoice,
-              icon: const Icon(Icons.qr_code_scanner_rounded),
-              label: Text(l.text('إضافة بالباركود', 'Add by barcode')),
-            ),
             const SizedBox(height: 12),
             _invoiceLinesEditor(
               lines: lines,
@@ -2838,7 +2860,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             ],
             const SizedBox(height: 10),
             if (quickSale ||
-                (invoiceType == 'sale' && !_permissions.canEditStorePrices))
+                (invoiceType == 'sale' && !_canApplyInvoiceDiscount))
               InputDecorator(
                 decoration: InputDecoration(
                   labelText: l.text('خصم', 'Discount'),
@@ -2918,12 +2940,11 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
               ),
             ],
             const SizedBox(height: 14),
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: Text(
-                'الإجمالي: ${_money(invoiceTotal)}',
-                style: AppTheme.h3,
-              ),
+            _invoiceDraftSummary(
+              subtotal: subtotal,
+              discount: discountValue,
+              total: invoiceTotal,
+              due: draftDue,
             ),
           ],
         );
@@ -3036,6 +3057,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
       lowNames
         ..clear()
         ..addAll(uniqueLowNames);
+      var serverConfirmed = false;
+      final invoiceClientRef = const Uuid().v4();
       try {
         await _store.queueInvoice(
           userId: _userId,
@@ -3083,9 +3106,52 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           actorUserId: _userId,
           actorName: _actorName,
           canEditStorePrices: _permissions.canEditStorePrices,
+          canOverrideSalePrice: _canOverrideSalePrice,
+          canApplyDiscount: _canApplyInvoiceDiscount,
+          maxDiscountPercent: _maximumDiscountPercent,
+          clientRef: invoiceClientRef,
+          requiresServerApproval: requiresServerApproval,
           canManageStoreDebts: _permissions.canManageStoreDebts,
         );
         await _showLocalThenSync(sync: false);
+        if (requiresServerApproval) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  l.text(
+                    'جارٍ تأكيد الفاتورة من الخادم قبل اعتماد البيع…',
+                    'Confirming the sale with the server before posting it…',
+                  ),
+                ),
+                duration: const Duration(minutes: 2),
+              ),
+            );
+          }
+          final confirmedSnapshot = await _store.syncPending(
+            userId: _userId,
+            api: _api,
+          );
+          final pending = await _store.getPendingOperations(_userId);
+          if (pending.any(
+            (operation) => operation['clientRef'] == invoiceClientRef,
+          )) {
+            throw StateError('لم يؤكد الخادم تسجيل الفاتورة.');
+          }
+          if (mounted) {
+            setState(() {
+              _snapshot = StoreManagementPrivacy.redactSnapshotForStaff(
+                confirmedSnapshot,
+                canViewProfits: _permissions.canViewStoreProfits,
+              );
+              _pending = pending;
+            });
+          }
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          }
+          serverConfirmed = true;
+        }
         final selectedCreditLimit =
             (selectedParty['creditLimit'] as num?)?.toDouble() ?? 0;
         final currentCustomerDebt =
@@ -3103,10 +3169,13 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             ),
           );
         }
-        if (ConnectivityService.instance.isOnline.value) {
+        if (!serverConfirmed &&
+            !requiresServerApproval &&
+            ConnectivityService.instance.isOnline.value) {
           unawaited(_sync());
         }
       } catch (error) {
+        if (requiresServerApproval) rethrow;
         if (mounted) {
           _showMessage(
             '${l.text('تعذر حفظ الفاتورة', 'Could not save the invoice')}: ${ErrorMessageService.sanitize(error)}',
@@ -4815,6 +4884,96 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
     );
   }
 
+  Widget _invoiceDraftSummary({
+    required double subtotal,
+    required double discount,
+    required double total,
+    required double due,
+  }) {
+    final l = context.loc;
+
+    Widget metric(String label, double value) => SizedBox(
+      width: 116,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTheme.caption,
+          ),
+          const SizedBox(height: 3),
+          Text(
+            _money(value),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTheme.bodyBold,
+          ),
+        ],
+      ),
+    );
+
+    final details = Wrap(
+      spacing: 16,
+      runSpacing: 10,
+      children: [
+        metric(l.text('قبل الخصم', 'Subtotal'), subtotal),
+        metric(l.text('الخصم', 'Discount'), discount),
+        metric(l.text('المتبقي', 'Due'), due),
+      ],
+    );
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.primary.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.primary.withValues(alpha: 0.18)),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final totalBlock = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                l.text('الإجمالي النهائي', 'Invoice total'),
+                style: AppTheme.caption,
+              ),
+              const SizedBox(height: 3),
+              Text(
+                _money(total),
+                style: AppTheme.h3.copyWith(color: AppTheme.primaryDark),
+              ),
+            ],
+          );
+          if (constraints.maxWidth >= 620) {
+            return Row(
+              children: [
+                Expanded(child: details),
+                const SizedBox(width: 16),
+                Container(width: 1, height: 48, color: AppTheme.border),
+                const SizedBox(width: 16),
+                totalBlock,
+              ],
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              details,
+              const SizedBox(height: 12),
+              const Divider(height: 1, color: AppTheme.border),
+              const SizedBox(height: 10),
+              totalBlock,
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Widget _invoiceLinesEditor({
     required List<Map<String, dynamic>> lines,
     required String invoiceType,
@@ -4847,13 +5006,12 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           vertical: 12,
         ),
       ),
-      onChanged: (value) => setFormState(
-        () => line['quantity'] = double.tryParse(value) ?? 0,
-      ),
+      onChanged: (value) =>
+          setFormState(() => line['quantity'] = double.tryParse(value) ?? 0),
     );
 
     Widget unitPriceField(Map<String, dynamic> line) {
-      if (invoiceType == 'sale' && !_permissions.canEditStorePrices) {
+      if (invoiceType == 'sale' && !_canOverrideSalePrice) {
         return InputDecorator(
           decoration: InputDecoration(
             labelText: unitPriceLabel,
@@ -4868,8 +5026,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
       }
       return TextFormField(
         key: ValueKey('price-${lineKey(line)}'),
-        initialValue:
-            ((line['unitPrice'] as num?)?.toDouble() ?? 0).toStringAsFixed(2),
+        initialValue: ((line['unitPrice'] as num?)?.toDouble() ?? 0)
+            .toStringAsFixed(2),
         keyboardType: const TextInputType.numberWithOptions(decimal: true),
         textAlign: TextAlign.center,
         decoration: InputDecoration(
@@ -4880,16 +5038,15 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
             vertical: 12,
           ),
         ),
-        onChanged: (value) => setFormState(
-          () => line['unitPrice'] = double.tryParse(value) ?? 0,
-        ),
+        onChanged: (value) =>
+            setFormState(() => line['unitPrice'] = double.tryParse(value) ?? 0),
       );
     }
 
     Widget futureSalePriceField(Map<String, dynamic> line) => TextFormField(
       key: ValueKey('sale-${lineKey(line)}'),
-      initialValue:
-          ((line['salePrice'] as num?)?.toDouble() ?? 0).toStringAsFixed(2),
+      initialValue: ((line['salePrice'] as num?)?.toDouble() ?? 0)
+          .toStringAsFixed(2),
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
       textAlign: TextAlign.center,
       decoration: InputDecoration(
@@ -4900,9 +5057,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
           vertical: 12,
         ),
       ),
-      onChanged: (value) => setFormState(
-        () => line['salePrice'] = double.tryParse(value) ?? 0,
-      ),
+      onChanged: (value) =>
+          setFormState(() => line['salePrice'] = double.tryParse(value) ?? 0),
     );
 
     Widget totalBadge(Map<String, dynamic> line) => Container(
@@ -4921,7 +5077,10 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
         Row(
           children: [
             Expanded(
-              child: Text(l.text('أصناف الفاتورة', 'Invoice items'), style: AppTheme.bodyBold),
+              child: Text(
+                l.text('أصناف الفاتورة', 'Invoice items'),
+                style: AppTheme.bodyBold,
+              ),
             ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -4945,7 +5104,10 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
               border: Border.all(color: AppTheme.border),
             ),
             child: Text(
-              l.text('أضف صنفًا لتظهر تفاصيله هنا.', 'Add an item to see its details here.'),
+              l.text(
+                'أضف صنفًا لتظهر تفاصيله هنا.',
+                'Add an item to see its details here.',
+              ),
               style: AppTheme.caption,
             ),
           )
@@ -4968,14 +5130,22 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                       ),
                       columns: [
                         DataColumn(label: Text(l.text('الصنف', 'Item'))),
-                        DataColumn(label: Text(l.text('الكمية', 'Qty')), numeric: true),
+                        DataColumn(
+                          label: Text(l.text('الكمية', 'Qty')),
+                          numeric: true,
+                        ),
                         DataColumn(label: Text(unitPriceLabel), numeric: true),
                         if (canEditFutureSalePrice)
                           DataColumn(
-                            label: Text(l.text('سعر البيع لاحقًا', 'Future sale price')),
+                            label: Text(
+                              l.text('سعر البيع لاحقًا', 'Future sale price'),
+                            ),
                             numeric: true,
                           ),
-                        DataColumn(label: Text(l.text('المجموع', 'Line total')), numeric: true),
+                        DataColumn(
+                          label: Text(l.text('المجموع', 'Line total')),
+                          numeric: true,
+                        ),
                         DataColumn(label: Text(l.text('حذف', 'Remove'))),
                       ],
                       rows: lines.asMap().entries.map((entry) {
@@ -4985,7 +5155,9 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                           cells: [
                             DataCell(
                               ConstrainedBox(
-                                constraints: const BoxConstraints(maxWidth: 240),
+                                constraints: const BoxConstraints(
+                                  maxWidth: 240,
+                                ),
                                 child: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -5006,11 +5178,18 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                                 ),
                               ),
                             ),
-                            DataCell(SizedBox(width: 96, child: quantityField(line))),
-                            DataCell(SizedBox(width: 132, child: unitPriceField(line))),
+                            DataCell(
+                              SizedBox(width: 96, child: quantityField(line)),
+                            ),
+                            DataCell(
+                              SizedBox(width: 132, child: unitPriceField(line)),
+                            ),
                             if (canEditFutureSalePrice)
                               DataCell(
-                                SizedBox(width: 148, child: futureSalePriceField(line)),
+                                SizedBox(
+                                  width: 148,
+                                  child: futureSalePriceField(line),
+                                ),
                               ),
                             DataCell(
                               SizedBox(width: 128, child: totalBadge(line)),
@@ -5018,7 +5197,8 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                             DataCell(
                               IconButton(
                                 tooltip: l.text('حذف الصنف', 'Remove item'),
-                                onPressed: () => setFormState(() => lines.removeAt(index)),
+                                onPressed: () =>
+                                    setFormState(() => lines.removeAt(index)),
                                 icon: const Icon(Icons.delete_outline_rounded),
                               ),
                             ),
@@ -5046,7 +5226,7 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                     color: AppTheme.surface,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: AppTheme.border),
+                      side: const BorderSide(color: AppTheme.border),
                     ),
                     child: Padding(
                       padding: const EdgeInsets.all(12),
@@ -5065,14 +5245,18 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                                       overflow: TextOverflow.ellipsis,
                                       style: AppTheme.bodyBold,
                                     ),
-                                    Text(line['unitName']?.toString() ?? '', style: AppTheme.caption),
+                                    Text(
+                                      line['unitName']?.toString() ?? '',
+                                      style: AppTheme.caption,
+                                    ),
                                   ],
                                 ),
                               ),
                               IconButton(
                                 tooltip: l.text('حذف الصنف', 'Remove item'),
                                 visualDensity: VisualDensity.compact,
-                                onPressed: () => setFormState(() => lines.removeAt(index)),
+                                onPressed: () =>
+                                    setFormState(() => lines.removeAt(index)),
                                 icon: const Icon(Icons.delete_outline_rounded),
                               ),
                             ],
@@ -5082,11 +5266,23 @@ class _StoreManagementScreenState extends State<StoreManagementScreen>
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              SizedBox(width: fieldWidth, child: quantityField(line)),
-                              SizedBox(width: fieldWidth, child: unitPriceField(line)),
-                              SizedBox(width: fieldWidth, child: totalBadge(line)),
+                              SizedBox(
+                                width: fieldWidth,
+                                child: quantityField(line),
+                              ),
+                              SizedBox(
+                                width: fieldWidth,
+                                child: unitPriceField(line),
+                              ),
+                              SizedBox(
+                                width: fieldWidth,
+                                child: totalBadge(line),
+                              ),
                               if (canEditFutureSalePrice)
-                                SizedBox(width: fieldWidth, child: futureSalePriceField(line)),
+                                SizedBox(
+                                  width: fieldWidth,
+                                  child: futureSalePriceField(line),
+                                ),
                             ],
                           ),
                         ],

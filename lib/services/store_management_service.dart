@@ -18,6 +18,42 @@ class StoreManagementService {
       'store_management_confirmed_snapshot_';
   static const _queueKeyPrefix = 'store_management_queue_';
   static const _offlineKeyName = 'store_management_aes_key_v1';
+  static const List<String> _maintenanceStatusFlow = [
+    'received',
+    'diagnosing',
+    'waiting_customer',
+    'waiting_parts',
+    'in_progress',
+    'completed',
+    'delivered',
+    'cancelled',
+  ];
+  static const Map<String, List<String>> _defaultMaintenanceStatusTransitions =
+      {
+        'received': ['diagnosing', 'cancelled'],
+        'diagnosing': [
+          'waiting_customer',
+          'waiting_parts',
+          'in_progress',
+          'cancelled',
+        ],
+        'waiting_customer': [
+          'diagnosing',
+          'waiting_parts',
+          'in_progress',
+          'cancelled',
+        ],
+        'waiting_parts': ['in_progress', 'cancelled'],
+        'in_progress': [
+          'waiting_customer',
+          'waiting_parts',
+          'completed',
+          'cancelled',
+        ],
+        'completed': ['in_progress', 'delivered'],
+        'delivered': [],
+        'cancelled': ['received'],
+      };
   static final AesGcm _cipher = AesGcm.with256bits();
   static const FlutterSecureStorage _secureStorage = appSecureStorage;
   static const Uuid _uuid = Uuid();
@@ -60,6 +96,50 @@ class StoreManagementService {
     await _restoreConfirmedWithPending(userId, next);
   });
 
+  Future<int> discardFailedMaintenanceOperation({
+    required String userId,
+    required String opId,
+  }) => _serialized(userId, () async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = '$_queueKeyPrefix$userId';
+    final queue = await _decodeList(prefs.getString(key));
+    final target = queue.firstWhere(
+      (item) => item['opId']?.toString() == opId,
+      orElse: () => const <String, dynamic>{},
+    );
+    if (target.isEmpty ||
+        target['entity'] != 'maintenance' ||
+        target['syncStatus'] != 'failed' ||
+        target['syncOutcomeUnknown'] == true) {
+      throw StateError('يمكن إلغاء عمليات الصيانة التي فشلت مزامنتها فقط.');
+    }
+    final targetSequence = (target['queueSequence'] as num?)?.toInt();
+    final targetAction = target['action']?.toString();
+    final targetOrderRef = targetAction == 'create'
+        ? target['clientRef']?.toString()
+        : target['orderClientRef']?.toString();
+    final targetOrderId = target['orderId']?.toString();
+    final next = queue.where((candidate) {
+      if (candidate['opId']?.toString() == opId) return false;
+      if (candidate['entity'] != 'maintenance') return true;
+      final sameOrder = targetOrderRef != null && targetOrderRef.isNotEmpty
+          ? candidate['orderClientRef']?.toString() == targetOrderRef ||
+                (candidate['action'] == 'create' &&
+                    candidate['clientRef']?.toString() == targetOrderRef)
+          : targetOrderId != null &&
+                candidate['orderId']?.toString() == targetOrderId;
+      if (!sameOrder) return true;
+      final sequence = (candidate['queueSequence'] as num?)?.toInt();
+      return sequence == null ||
+          targetSequence == null ||
+          sequence < targetSequence;
+    }).toList();
+    final removedCount = queue.length - next.length;
+    await _storePendingOperations(userId, next);
+    await _restoreConfirmedWithPending(userId, next);
+    return removedCount;
+  });
+
   Future<void> clearPendingOperations(String userId) =>
       _serialized(userId, () async {
         final prefs = await SharedPreferences.getInstance();
@@ -90,20 +170,79 @@ class StoreManagementService {
     });
   }
 
-  Future<Map<String, dynamic>> getMaintenanceSnapshot(String userId) async =>
-      Map<String, dynamic>.from(
-        (await getSnapshot(userId))['maintenance'] as Map? ?? const {},
-      );
+  Future<Map<String, dynamic>> getMaintenanceSnapshot(String userId) async {
+    final maintenance = Map<String, dynamic>.from(
+      (await getSnapshot(userId))['maintenance'] as Map? ?? const {},
+    );
+    maintenance.putIfAbsent('statusFlow', () => _maintenanceStatusFlow);
+    maintenance.putIfAbsent(
+      'statusTransitions',
+      () => _defaultMaintenanceStatusTransitions,
+    );
+    return maintenance;
+  }
 
-  Future<void> cacheMaintenanceSnapshot(
+  Future<Map<String, dynamic>> cacheMaintenanceSnapshot(
     String userId,
     Map<String, dynamic> data,
   ) => _serialized(userId, () async {
-    final snapshot = await getSnapshot(userId);
-    await _storeSnapshot(userId, {...snapshot, 'maintenance': data});
     final confirmed = await _getConfirmedSnapshot(userId);
-    await _storeConfirmedSnapshot(userId, {...confirmed, 'maintenance': data});
+    final previousMaintenance = Map<String, dynamic>.from(
+      confirmed['maintenance'] as Map? ?? const {},
+    );
+    final merged = _mergeMaintenancePage(previousMaintenance, data);
+    final nextConfirmed = {...confirmed, 'maintenance': merged};
+    await _storeConfirmedSnapshot(userId, nextConfirmed);
+    final pending = await getPendingOperations(userId);
+    final composed = _replayPendingOperations(nextConfirmed, pending);
+    await _storeSnapshot(userId, composed);
+    return Map<String, dynamic>.from(
+      composed['maintenance'] as Map? ?? const {},
+    );
   });
+
+  Future<Map<String, dynamic>> appendMaintenancePage(
+    String userId,
+    Map<String, dynamic> page,
+  ) => _serialized(userId, () async {
+    final confirmed = await _getConfirmedSnapshot(userId);
+    final previousMaintenance = Map<String, dynamic>.from(
+      confirmed['maintenance'] as Map? ?? const {},
+    );
+    final merged = _mergeMaintenancePage(previousMaintenance, page);
+    final nextConfirmed = {...confirmed, 'maintenance': merged};
+    await _storeConfirmedSnapshot(userId, nextConfirmed);
+    final pending = await getPendingOperations(userId);
+    final composed = _replayPendingOperations(nextConfirmed, pending);
+    await _storeSnapshot(userId, composed);
+    return Map<String, dynamic>.from(
+      composed['maintenance'] as Map? ?? const {},
+    );
+  });
+
+  Map<String, dynamic> _mergeMaintenancePage(
+    Map<String, dynamic> previous,
+    Map<String, dynamic> page,
+  ) {
+    final incomingOrders = _list(page['orders']);
+    final knownKeys = incomingOrders
+        .map(
+          (order) =>
+              order['id']?.toString() ?? order['clientRef']?.toString() ?? '',
+        )
+        .where((key) => key.isNotEmpty)
+        .toSet();
+    final olderOrders = _list(previous['orders']).where((order) {
+      final key =
+          order['id']?.toString() ?? order['clientRef']?.toString() ?? '';
+      return key.isEmpty || !knownKeys.contains(key);
+    });
+    return {
+      ...previous,
+      ...page,
+      'orders': [...incomingOrders, ...olderOrders],
+    };
+  }
 
   Future<void> queueMaintenance({
     required String userId,
@@ -197,6 +336,18 @@ class StoreManagementService {
       }
     }
     if (action == 'update') {
+      const financialFields = [
+        'laborPrice',
+        'otherCost',
+        'discount',
+        'paidAmount',
+        'estimatedCost',
+      ];
+      if (order['invoiceId'] != null && financialFields.any(data.containsKey)) {
+        throw StateError(
+          'لا يمكن تعديل القيم المالية بعد إصدار الفاتورة. سجل أي دفعة لاحقة من حساب العميل.',
+        );
+      }
       final from = order['status']?.toString() ?? 'received';
       final to = data['status']?.toString() ?? from;
       final transitions = Map<String, dynamic>.from(
@@ -205,7 +356,7 @@ class StoreManagementService {
       final allowed = transitions[from] is List
           ? List<String>.from(transitions[from] as List)
           : const <String>[];
-      if (to != from && transitions.isNotEmpty && !allowed.contains(to)) {
+      if (to != from && !allowed.contains(to)) {
         throw StateError('انتقال حالة الصيانة المطلوب غير مسموح.');
       }
       if (to == 'delivered' && order['invoiceId'] == null) {
@@ -396,6 +547,10 @@ class StoreManagementService {
               'syncStatus': 'failed',
               'lastSyncError': error.toString(),
               'lastSyncAttemptAt': DateTime.now().toIso8601String(),
+              'syncOutcomeUnknown':
+                  !(error is ApiResponseException &&
+                      error.statusCode >= 400 &&
+                      error.statusCode < 500),
             };
             await _storePendingOperations(userId, remaining);
           }
@@ -431,6 +586,7 @@ class StoreManagementService {
             .toList()
           ..sort(_syncPriorityCompare);
     for (final operation in ordered) {
+      if (operation['requiresServerApproval'] == true) continue;
       rebased = _applyLocalOperation(rebased, operation);
     }
     return rebased;
@@ -461,10 +617,20 @@ class StoreManagementService {
     Map<String, dynamic> serverSnapshot,
   ) async {
     final confirmed = await _getConfirmedSnapshot(userId);
-    return confirmed['maintenance'] is Map &&
-            serverSnapshot['maintenance'] == null
-        ? {...serverSnapshot, 'maintenance': confirmed['maintenance']}
-        : serverSnapshot;
+    if (confirmed['maintenance'] is! Map) return serverSnapshot;
+    final confirmedMaintenance = Map<String, dynamic>.from(
+      confirmed['maintenance'] as Map,
+    );
+    final freshMaintenance = serverSnapshot['maintenance'];
+    return {
+      ...serverSnapshot,
+      'maintenance': freshMaintenance is Map
+          ? _mergeMaintenancePage(
+              confirmedMaintenance,
+              Map<String, dynamic>.from(freshMaintenance),
+            )
+          : confirmedMaintenance,
+    };
   }
 
   Future<void> _restoreConfirmedWithPending(
@@ -624,14 +790,28 @@ class StoreManagementService {
     String? actorUserId,
     String? actorName,
     bool canEditStorePrices = true,
+    bool canOverrideSalePrice = false,
+    bool canApplyDiscount = false,
+    double maxDiscountPercent = 0,
+    bool requiresServerApproval = false,
     bool canManageStoreDebts = false,
   }) async {
     var invoiceItems = items
         .map((item) => Map<String, dynamic>.from(item))
         .toList();
-    if (invoiceType == 'sale' && !canEditStorePrices) {
-      if (discount > 0) {
+    if (invoiceType == 'sale' && !canEditStorePrices && !canOverrideSalePrice) {
+      if (discount > 0 && !canApplyDiscount) {
         throw StateError('لا تملك صلاحية اعتماد خصم على فاتورة البيع.');
+      }
+      final subtotal = invoiceItems.fold<double>(
+        0,
+        (sum, item) =>
+            sum +
+            ((item['quantity'] as num?)?.toDouble() ?? 0) *
+                ((item['unitPrice'] as num?)?.toDouble() ?? 0),
+      );
+      if (discount > subtotal * maxDiscountPercent / 100 + 0.009) {
+        throw StateError('قيمة الخصم تتجاوز الحد المعتمد لهذا المستخدم.');
       }
       final snapshot = await getSnapshot(userId);
       final products = _list(snapshot['products']);
@@ -670,6 +850,8 @@ class StoreManagementService {
       paidAmount: paidAmount,
       discount: discount,
       quickSale: quickSale,
+      canApplyDiscount: canEditStorePrices || canApplyDiscount,
+      maxDiscountPercent: canEditStorePrices ? 100 : maxDiscountPercent,
       canManageStoreDebts: canManageStoreDebts,
       items: invoiceItems,
     );
@@ -728,6 +910,7 @@ class StoreManagementService {
       'notes': notes.trim(),
       'invoiceNumber': ?invoiceNumber,
       'quickSale': quickSale,
+      if (requiresServerApproval) 'requiresServerApproval': true,
       'actorUserId': ?actorUserId,
       'actorName': ?actorName,
       'occurredAt': (occurredAt ?? DateTime.now()).toIso8601String(),
@@ -984,6 +1167,8 @@ class StoreManagementService {
     required double paidAmount,
     required double discount,
     required bool quickSale,
+    required bool canApplyDiscount,
+    required double maxDiscountPercent,
     required bool canManageStoreDebts,
     required List<Map<String, dynamic>> items,
   }) {
@@ -1024,6 +1209,13 @@ class StoreManagementService {
     }
     if (discount < 0 || discount > subtotal) {
       throw StateError('الخصم لا يمكن أن يتجاوز إجمالي الفاتورة.');
+    }
+    if (invoiceType == 'sale' && discount > 0 && !canApplyDiscount) {
+      throw StateError('لا تملك صلاحية اعتماد خصم على فاتورة البيع.');
+    }
+    if (invoiceType == 'sale' &&
+        discount > subtotal * maxDiscountPercent / 100 + 0.009) {
+      throw StateError('قيمة الخصم تتجاوز الحد المعتمد لهذا المستخدم.');
     }
     final total = subtotal - discount;
     if (paidAmount < 0 || paidAmount > total) {
@@ -1179,7 +1371,9 @@ class StoreManagementService {
       ..remove('syncStatus')
       ..remove('lastSyncError')
       ..remove('lastSyncAttemptAt')
-      ..remove('deferUntilNoPendingInvoices');
+      ..remove('syncOutcomeUnknown')
+      ..remove('deferUntilNoPendingInvoices')
+      ..remove('requiresServerApproval');
   }
 
   Future<void> _enqueueAndApply(
@@ -1211,7 +1405,9 @@ class StoreManagementService {
         return;
       }
     }
-    final next = _applyLocalOperation(snapshot, operation);
+    final next = operation['requiresServerApproval'] == true
+        ? snapshot
+        : _applyLocalOperation(snapshot, operation);
     await _enqueue(userId, operation);
     await _storeSnapshot(userId, next);
   });
@@ -1429,6 +1625,15 @@ class StoreManagementService {
       snapshot['maintenance'] as Map? ?? const {},
     );
     final orders = _list(maintenance['orders']);
+    final statusCounts = Map<String, dynamic>.from(
+      maintenance['statusCounts'] as Map? ?? const {},
+    );
+    void adjustStatus(String? status, int change) {
+      if (status == null || status.isEmpty) return;
+      statusCounts[status] =
+          ((statusCounts[status] as num?)?.toInt() ?? 0) + change;
+    }
+
     final action = op['action']?.toString();
     final actor = {
       'id': op['actorUserId']?.toString() ?? '',
@@ -1436,38 +1641,44 @@ class StoreManagementService {
     };
     if (action == 'create') {
       final ref = op['clientRef'].toString();
-      orders.insert(0, {
-        ...op,
-        'id': 'local:$ref',
-        'clientRef': ref,
-        'orderNumber': 'محلي-${ref.substring(0, 6)}',
-        'status': 'received',
-        'priority': op['priority'] ?? 'normal',
-        'parts': [],
-        'logs': [
-          {
-            'id': 'local:log:$ref',
-            'action': 'created',
-            'fromStatus': null,
-            'toStatus': 'received',
-            'note': '',
-            'actor': actor,
-            'createdAt': op['createdAt'],
-          },
-        ],
-        'contacts': [],
-        'receivedBy': actor,
-        'partsPrice': 0.0,
-        'partsCost': 0.0,
-        'laborPrice': 0.0,
-        'otherCost': 0.0,
-        'discount': 0.0,
-        'total': 0.0,
-        'paidAmount': 0.0,
-        'profit': 0.0,
-        'createdAt': op['createdAt'],
-        'pendingSync': true,
-      });
+      final alreadyConfirmed = orders.any(
+        (order) => order['clientRef']?.toString() == ref,
+      );
+      if (!alreadyConfirmed) adjustStatus('received', 1);
+      if (!alreadyConfirmed) {
+        orders.insert(0, {
+          ...op,
+          'id': 'local:$ref',
+          'clientRef': ref,
+          'orderNumber': 'محلي-${ref.substring(0, 6)}',
+          'status': 'received',
+          'priority': op['priority'] ?? 'normal',
+          'parts': [],
+          'logs': [
+            {
+              'id': 'local:log:$ref',
+              'action': 'created',
+              'fromStatus': null,
+              'toStatus': 'received',
+              'note': '',
+              'actor': actor,
+              'createdAt': op['createdAt'],
+            },
+          ],
+          'contacts': [],
+          'receivedBy': actor,
+          'partsPrice': 0.0,
+          'partsCost': 0.0,
+          'laborPrice': 0.0,
+          'otherCost': 0.0,
+          'discount': 0.0,
+          'total': 0.0,
+          'paidAmount': 0.0,
+          'profit': 0.0,
+          'createdAt': op['createdAt'],
+          'pendingSync': true,
+        });
+      }
     } else {
       final index = orders.indexWhere(
         (o) => _matchesRef(
@@ -1480,7 +1691,20 @@ class StoreManagementService {
         final order = Map<String, dynamic>.from(orders[index]);
         if (action == 'update') {
           final oldStatus = order['status']?.toString();
+          final newStatus = op['status']?.toString() ?? oldStatus;
+          if (newStatus != oldStatus) {
+            adjustStatus(oldStatus, -1);
+            adjustStatus(newStatus, 1);
+          }
           order.addAll(op);
+          if (oldStatus == 'completed' && newStatus == 'in_progress') {
+            order['completedAt'] = null;
+          } else if (newStatus == 'completed' && oldStatus != 'completed') {
+            order['completedAt'] = op['createdAt'];
+          }
+          if (newStatus == 'delivered' && oldStatus != 'delivered') {
+            order['deliveredAt'] = op['createdAt'];
+          }
           final employeeId = op['assignedToUserId']?.toString();
           if (employeeId != null && employeeId.isNotEmpty) {
             order['assignedTo'] = _list(maintenance['employees']).firstWhere(
@@ -1615,6 +1839,7 @@ class StoreManagementService {
       }
     }
     maintenance['orders'] = orders;
+    if (statusCounts.isNotEmpty) maintenance['statusCounts'] = statusCounts;
     _refreshLocalMaintenanceReports(maintenance);
     snapshot['maintenance'] = maintenance;
   }

@@ -802,6 +802,16 @@ void main() {
       const userId = 'offline-maintenance-stock-user';
       await service.cacheMaintenanceSnapshot(userId, {
         'orders': <Map<String, dynamic>>[],
+        'statusCounts': {
+          'received': 0,
+          'diagnosing': 0,
+          'waiting_customer': 0,
+          'waiting_parts': 0,
+          'in_progress': 0,
+          'completed': 0,
+          'delivered': 0,
+          'cancelled': 0,
+        },
         'permissions': {
           'canViewStoreReports': true,
           'canViewStoreProfits': true,
@@ -842,6 +852,7 @@ void main() {
       );
       final maintenance = await service.getMaintenanceSnapshot(userId);
       final order = (maintenance['orders'] as List).first as Map;
+      expect((maintenance['statusCounts'] as Map)['received'], 1);
       expect((order['receivedBy'] as Map)['name'], 'موظف الصيانة');
       expect(
         ((order['logs'] as List).first['actor'] as Map)['name'],
@@ -866,13 +877,16 @@ void main() {
         orderId: order['id'] as String,
         orderClientRef: order['clientRef'] as String,
         data: const {
-          'status': 'received',
+          'status': 'diagnosing',
           'assignedToUserId': 'employee-1',
           'laborPrice': 10.0,
           'actorUserId': 'employee-1',
           'actorName': 'موظف الصيانة',
         },
       );
+      final updatedMaintenance = await service.getMaintenanceSnapshot(userId);
+      expect((updatedMaintenance['statusCounts'] as Map)['received'], 0);
+      expect((updatedMaintenance['statusCounts'] as Map)['diagnosing'], 1);
       final updated = await service.getMaintenanceSnapshot(userId);
       final updatedOrder = (updated['orders'] as List).first as Map;
       expect(updatedOrder['total'], 50.0);
@@ -1085,6 +1099,181 @@ void main() {
     );
   });
 
+  test(
+    'old maintenance cache receives safe default status transitions',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'old-maintenance-status-cache-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [
+          {
+            'id': 'old-maintenance-order',
+            'clientRef': 'old-maintenance-order-ref',
+            'status': 'in_progress',
+            'assignedTo': {'id': 'technician-1', 'name': 'فني'},
+            'diagnosis': 'فحص الجهاز',
+            'parts': <Map<String, dynamic>>[],
+            'logs': <Map<String, dynamic>>[],
+            'contacts': <Map<String, dynamic>>[],
+            'laborPrice': 10.0,
+            'partsPrice': 0.0,
+            'partsCost': 0.0,
+            'otherCost': 0.0,
+            'discount': 0.0,
+            'paidAmount': 0.0,
+            'total': 10.0,
+            'createdAt': DateTime.now().toIso8601String(),
+          },
+        ],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+        'employees': <Map<String, dynamic>>[],
+        'permissions': <String, dynamic>{},
+      });
+
+      final maintenance = await service.getMaintenanceSnapshot(userId);
+      expect((maintenance['statusFlow'] as List).length, 8);
+      await expectLater(
+        service.queueMaintenance(
+          userId: userId,
+          action: 'update',
+          orderId: 'old-maintenance-order',
+          orderClientRef: 'old-maintenance-order-ref',
+          data: const {'status': 'received'},
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(await service.getPendingOperations(userId), isEmpty);
+    },
+  );
+
+  test(
+    'offline maintenance totals and losses match the saved order values',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'offline-maintenance-totals-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [
+          {
+            'id': 'maintenance-loss-order',
+            'clientRef': 'maintenance-loss-order-ref',
+            'status': 'in_progress',
+            'assignedTo': {'id': 'technician-1', 'name': 'فني'},
+            'diagnosis': 'تبديل قطعة',
+            'parts': [
+              {
+                'productName': 'قطعة',
+                'quantity': 1,
+                'priceTotal': 20.0,
+                'costTotal': 50.0,
+              },
+            ],
+            'logs': <Map<String, dynamic>>[],
+            'contacts': <Map<String, dynamic>>[],
+            'laborPrice': 0.0,
+            'partsPrice': 20.0,
+            'partsCost': 50.0,
+            'otherCost': 0.0,
+            'discount': 0.0,
+            'paidAmount': 0.0,
+            'total': 20.0,
+            'dueAmount': 20.0,
+            'profit': 0.0,
+            'createdAt': DateTime.now().toIso8601String(),
+          },
+        ],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+        'employees': <Map<String, dynamic>>[],
+        'permissions': <String, dynamic>{'canViewStoreProfits': true},
+      });
+
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'update',
+        orderId: 'maintenance-loss-order',
+        orderClientRef: 'maintenance-loss-order-ref',
+        data: const {'status': 'in_progress'},
+      );
+
+      final order =
+          ((await service.getMaintenanceSnapshot(userId))['orders'] as List)
+                  .single
+              as Map;
+      expect(order['profit'], -30.0);
+      expect(order['dueAmount'], 20.0);
+    },
+  );
+
+  test('offline reopening clears and then refreshes completion time', () async {
+    final service = StoreManagementService();
+    const userId = 'maintenance-reopen-completion-user';
+    await service.cacheMaintenanceSnapshot(userId, {
+      'orders': [
+        {
+          'id': 'maintenance-reopen-order',
+          'clientRef': 'maintenance-reopen-ref',
+          'status': 'completed',
+          'completedAt': 'previous-completion-time',
+          'assignedTo': {'id': 'technician-1', 'name': 'فني'},
+          'diagnosis': 'تم الإصلاح',
+          'parts': <Map<String, dynamic>>[],
+          'logs': <Map<String, dynamic>>[],
+          'contacts': <Map<String, dynamic>>[],
+          'laborPrice': 20.0,
+          'partsPrice': 0.0,
+          'partsCost': 0.0,
+          'otherCost': 0.0,
+          'discount': 0.0,
+          'paidAmount': 0.0,
+          'total': 20.0,
+          'profit': 20.0,
+          'createdAt': DateTime.now().toIso8601String(),
+        },
+      ],
+      'products': <Map<String, dynamic>>[],
+      'warehouses': <Map<String, dynamic>>[],
+      'employees': <Map<String, dynamic>>[],
+      'permissions': <String, dynamic>{},
+      'statusTransitions': <String, dynamic>{
+        'completed': ['in_progress', 'delivered'],
+        'in_progress': [
+          'waiting_customer',
+          'waiting_parts',
+          'completed',
+          'cancelled',
+        ],
+      },
+    });
+
+    await service.queueMaintenance(
+      userId: userId,
+      action: 'update',
+      orderId: 'maintenance-reopen-order',
+      orderClientRef: 'maintenance-reopen-ref',
+      data: const {'status': 'in_progress'},
+    );
+    var order =
+        ((await service.getMaintenanceSnapshot(userId))['orders'] as List)
+                .single
+            as Map;
+    expect(order['completedAt'], isNull);
+
+    await service.queueMaintenance(
+      userId: userId,
+      action: 'update',
+      orderId: 'maintenance-reopen-order',
+      orderClientRef: 'maintenance-reopen-ref',
+      data: const {'status': 'completed'},
+    );
+    order =
+        ((await service.getMaintenanceSnapshot(userId))['orders'] as List)
+                .single
+            as Map;
+    final pending = await service.getPendingOperations(userId);
+    expect(order['completedAt'], pending.last['createdAt']);
+  });
+
   test('maintenance invoice syncs before delivered status', () async {
     final service = StoreManagementService();
     final api = _MaintenanceOrderApi();
@@ -1122,6 +1311,16 @@ void main() {
       orderId: 'maintenance-order-1',
       orderClientRef: 'maintenance-order-ref-1',
     );
+    await expectLater(
+      service.queueMaintenance(
+        userId: userId,
+        action: 'update',
+        orderId: 'maintenance-order-1',
+        orderClientRef: 'maintenance-order-ref-1',
+        data: const {'status': 'delivered', 'laborPrice': 20.0},
+      ),
+      throwsA(isA<StateError>()),
+    );
     await service.queueMaintenance(
       userId: userId,
       action: 'update',
@@ -1132,6 +1331,225 @@ void main() {
     await service.syncPending(userId: userId, api: api);
     expect(api.actions, ['finalize', 'update']);
   });
+
+  test(
+    'discarding a failed maintenance action clears later actions for its order',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'failed-maintenance-discard-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': <Map<String, dynamic>>[],
+        'statusCounts': {'received': 0, 'diagnosing': 0},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+        'statusTransitions': {
+          'received': ['diagnosing'],
+        },
+      });
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'create',
+        data: const {
+          'customerName': 'عميل',
+          'customerPhone': '0599000000',
+          'deviceType': 'هاتف',
+          'reportedIssue': 'عطل',
+          'deviceCondition': 'سليم',
+          'location': 'رف',
+        },
+      );
+      final order =
+          ((await service.getMaintenanceSnapshot(userId))['orders'] as List)
+                  .single
+              as Map;
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'update',
+        orderId: order['id'] as String,
+        orderClientRef: order['clientRef'] as String,
+        data: const {'status': 'diagnosing'},
+      );
+      await expectLater(
+        service.syncPending(userId: userId, api: _FailedMaintenanceOrderApi()),
+        throwsA(isA<StoreManagementSyncException>()),
+      );
+      final queue = await service.getPendingOperations(userId);
+      expect(queue.first['syncStatus'], 'failed');
+
+      final removed = await service.discardFailedMaintenanceOperation(
+        userId: userId,
+        opId: queue.first['opId'] as String,
+      );
+
+      expect(removed, 2);
+      expect(await service.getPendingOperations(userId), isEmpty);
+      expect((await service.getMaintenanceSnapshot(userId))['orders'], isEmpty);
+    },
+  );
+
+  test(
+    'ambiguous maintenance sync results must be retried, not discarded',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'uncertain-maintenance-sync-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': <Map<String, dynamic>>[],
+        'statusCounts': {'received': 0},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+      });
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'create',
+        data: const {
+          'customerName': 'عميل',
+          'customerPhone': '0599000000',
+          'deviceType': 'هاتف',
+          'reportedIssue': 'عطل',
+          'deviceCondition': 'سليم',
+          'location': 'رف',
+        },
+      );
+      await expectLater(
+        service.syncPending(
+          userId: userId,
+          api: _UncertainMaintenanceOrderApi(),
+        ),
+        throwsA(isA<StoreManagementSyncException>()),
+      );
+      final operation = (await service.getPendingOperations(userId)).single;
+      expect(operation['syncOutcomeUnknown'], isTrue);
+      await expectLater(
+        service.discardFailedMaintenanceOperation(
+          userId: userId,
+          opId: operation['opId'] as String,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(await service.getPendingOperations(userId), hasLength(1));
+    },
+  );
+
+  test(
+    'a locally pending order reconciles with a server copy after lost confirmation',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'reconciled-maintenance-create-user';
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': <Map<String, dynamic>>[],
+        'statusCounts': {'received': 0},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+      });
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'create',
+        data: const {
+          'customerName': 'عميل',
+          'customerPhone': '0599000000',
+          'deviceType': 'هاتف',
+          'reportedIssue': 'عطل',
+          'deviceCondition': 'سليم',
+          'location': 'رف',
+        },
+      );
+      final localOrder =
+          ((await service.getMaintenanceSnapshot(userId))['orders'] as List)
+                  .single
+              as Map;
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [
+          {
+            ...Map<String, dynamic>.from(localOrder),
+            'id': 'server-maintenance-order',
+            'orderNumber': 'MNT-20261107-0001',
+          },
+        ],
+        'statusCounts': {'received': 1},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+      });
+
+      final reconciled = await service.getMaintenanceSnapshot(userId);
+      final orders = reconciled['orders'] as List;
+      expect(orders, hasLength(1));
+      expect((orders.single as Map)['id'], 'server-maintenance-order');
+      expect((reconciled['statusCounts'] as Map)['received'], 1);
+    },
+  );
+
+  test(
+    'refreshing a newer page preserves a pending change on an older order',
+    () async {
+      final service = StoreManagementService();
+      const userId = 'older-maintenance-pending-update-user';
+      final olderOrder = <String, dynamic>{
+        'id': 'older-order-1',
+        'clientRef': 'older-order-ref-1',
+        'orderNumber': 'MNT-20261001-0001',
+        'status': 'diagnosing',
+        'assignedTo': {'id': 'tech-1', 'name': 'فني'},
+        'diagnosis': 'تم الفحص',
+        'parts': <Map<String, dynamic>>[],
+        'logs': <Map<String, dynamic>>[],
+        'contacts': <Map<String, dynamic>>[],
+      };
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [olderOrder],
+        'statusCounts': {'diagnosing': 1, 'in_progress': 0},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+        'statusTransitions': {
+          'diagnosing': ['in_progress'],
+        },
+      });
+      await service.queueMaintenance(
+        userId: userId,
+        action: 'update',
+        orderId: 'older-order-1',
+        orderClientRef: 'older-order-ref-1',
+        data: const {'status': 'in_progress'},
+      );
+      await service.cacheMaintenanceSnapshot(userId, {
+        'orders': [
+          {
+            'id': 'newer-order-1',
+            'clientRef': 'newer-order-ref-1',
+            'orderNumber': 'MNT-20261107-0001',
+            'status': 'received',
+            'parts': <Map<String, dynamic>>[],
+            'logs': <Map<String, dynamic>>[],
+            'contacts': <Map<String, dynamic>>[],
+          },
+        ],
+        'statusCounts': {'diagnosing': 1, 'in_progress': 0, 'received': 1},
+        'employees': <Map<String, dynamic>>[],
+        'products': <Map<String, dynamic>>[],
+        'warehouses': <Map<String, dynamic>>[],
+        'statusTransitions': {
+          'diagnosing': ['in_progress'],
+        },
+      });
+
+      final refreshed = await service.getMaintenanceSnapshot(userId);
+      final refreshedOrders = (refreshed['orders'] as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+      final preservedOrder = refreshedOrders.singleWhere(
+        (item) => item['id'] == 'older-order-1',
+      );
+      expect(preservedOrder['status'], 'in_progress');
+      expect(preservedOrder['pendingSync'], isTrue);
+      expect(refreshedOrders, hasLength(2));
+      expect((refreshed['statusCounts'] as Map)['diagnosing'], 0);
+      expect((refreshed['statusCounts'] as Map)['in_progress'], 1);
+    },
+  );
 
   test(
     'invalid maintenance finalization never enters the offline queue',
@@ -1616,6 +2034,8 @@ class _MaintenanceOrderApi extends ApiService {
   Future<Map<String, dynamic>> getMaintenanceSnapshot({
     String search = '',
     String status = '',
+    int offset = 0,
+    int limit = 100,
   }) async => {
     'orders': [
       {
@@ -1634,4 +2054,19 @@ class _MaintenanceOrderApi extends ApiService {
     'employees': <Map<String, dynamic>>[],
     'permissions': <String, dynamic>{},
   };
+}
+
+class _FailedMaintenanceOrderApi extends _MaintenanceOrderApi {
+  @override
+  Future<Map<String, dynamic>> syncStoreManagement(
+    List<Map<String, dynamic>> operations,
+  ) async =>
+      throw const ApiResponseException(422, 'simulated validation rejection');
+}
+
+class _UncertainMaintenanceOrderApi extends _MaintenanceOrderApi {
+  @override
+  Future<Map<String, dynamic>> syncStoreManagement(
+    List<Map<String, dynamic>> operations,
+  ) async => throw StateError('simulated lost response');
 }

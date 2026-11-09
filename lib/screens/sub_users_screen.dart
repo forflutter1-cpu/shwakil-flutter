@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/index.dart';
 import '../utils/app_permissions.dart';
@@ -24,6 +25,9 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
   final _fullNameController = TextEditingController();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _minimumMarginController = TextEditingController(text: '0');
+  final _maxDiscountController = TextEditingController(text: '0');
+  final _maxLossController = TextEditingController(text: '0');
 
   List<Map<String, dynamic>> _subUsers = const [];
   Map<String, dynamic>? _editing;
@@ -32,9 +36,9 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
   bool _isDisabled = false;
   bool _canViewSubUsers = false;
   bool _canManageSubUsers = false;
-  late final Map<String, bool> _permissions = _defaultPermissions();
+  late final Map<String, dynamic> _permissions = _defaultPermissions();
 
-  static Map<String, bool> _defaultPermissions() => {
+  static Map<String, dynamic> _defaultPermissions() => {
     'canTransfer': false,
     'canScanCards': true,
     'canOfflineCardScan': true,
@@ -47,6 +51,11 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
     'canAccessStoreManagement': false,
     'canManageStoreInventory': false,
     'canCreateStoreSales': false,
+    'canOverrideStoreSalePrice': false,
+    'canApplyStoreDiscount': false,
+    'storeMinimumMarginPercent': 0.0,
+    'storeMaxDiscountPercent': 0.0,
+    'storeMaxInvoiceLossPercent': 0.0,
     'canCreateStorePurchases': false,
     'canManageStoreDebts': false,
     'canViewStoreReports': false,
@@ -87,6 +96,9 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
     _fullNameController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _minimumMarginController.dispose();
+    _maxDiscountController.dispose();
+    _maxLossController.dispose();
     super.dispose();
   }
 
@@ -134,8 +146,16 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       _passwordController.clear();
       _isDisabled = user['isDisabled'] == true;
       for (final key in _permissions.keys) {
-        _permissions[key] = permissions[key] == true;
+        _permissions[key] = _permissions[key] is bool
+            ? permissions[key] == true
+            : (permissions[key] as num?)?.toDouble() ?? 0.0;
       }
+      _minimumMarginController.text =
+          '${_permissions['storeMinimumMarginPercent'] ?? 0}';
+      _maxDiscountController.text =
+          '${_permissions['storeMaxDiscountPercent'] ?? 0}';
+      _maxLossController.text =
+          '${_permissions['storeMaxInvoiceLossPercent'] ?? 0}';
     });
   }
 
@@ -150,6 +170,9 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       for (final key in _permissions.keys) {
         _permissions[key] = defaults[key] ?? false;
       }
+      _minimumMarginController.text = '0';
+      _maxDiscountController.text = '0';
+      _maxLossController.text = '0';
     });
   }
 
@@ -158,6 +181,8 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       'canAccessStoreManagement',
       'canManageStoreInventory',
       'canCreateStoreSales',
+      'canOverrideStoreSalePrice',
+      'canApplyStoreDiscount',
       'canCreateStorePurchases',
       'canManageStoreDebts',
       'canViewStoreReports',
@@ -167,8 +192,22 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       for (final key in storeKeys) {
         _permissions[key] = false;
       }
+      _permissions['storeMinimumMarginPercent'] = 0.0;
+      _permissions['storeMaxDiscountPercent'] = 0.0;
+      _permissions['storeMaxInvoiceLossPercent'] = 0.0;
       _permissions['canAccessStoreManagement'] = true;
       _permissions['canCreateStoreSales'] = true;
+      _permissions['canOverrideStoreSalePrice'] = role == 'manager';
+      _permissions['canApplyStoreDiscount'] =
+          role == 'manager' || role == 'supervisor';
+      _permissions['storeMaxDiscountPercent'] =
+          role == 'manager' || role == 'supervisor' ? 20.0 : 0.0;
+      _permissions['storeMaxInvoiceLossPercent'] = 0.0;
+      _minimumMarginController.text = '0';
+      _maxDiscountController.text = role == 'manager' || role == 'supervisor'
+          ? '20'
+          : '0';
+      _maxLossController.text = '0';
       if (role == 'technician') {
         _permissions['canManageStoreInventory'] = true;
       }
@@ -219,13 +258,13 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
               fullName: _fullNameController.text,
               username: _usernameController.text,
               password: _passwordController.text,
-              permissions: Map<String, bool>.from(_permissions),
+              permissions: Map<String, dynamic>.from(_permissions),
             )
           : await _api.updateSubUser(
               subUserId: _editing!['id'].toString(),
               fullName: _fullNameController.text,
               password: _passwordController.text,
-              permissions: Map<String, bool>.from(_permissions),
+              permissions: Map<String, dynamic>.from(_permissions),
               isDisabled: _isDisabled,
             );
       if (!mounted) return;
@@ -360,7 +399,7 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
   }
 
   int get _enabledPermissionsCount =>
-      _permissions.entries.where((entry) => entry.value).length;
+      _permissions.entries.where((entry) => entry.value == true).length;
 
   @override
   Widget build(BuildContext context) {
@@ -763,6 +802,53 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
             (key) =>
                 _permissionTile(PermissionCatalog.label(context, key), key),
           ),
+          const SizedBox(height: 8),
+          Text(
+            context.loc.text('ضوابط البيع للكاشير', 'Cashier sales controls'),
+            style: AppTheme.bodyBold,
+          ),
+          const SizedBox(height: 8),
+          _permissionTile(
+            context.loc.text(
+              'السماح بتعديل سعر البيع',
+              'Allow changing sale prices',
+            ),
+            'canOverrideStoreSalePrice',
+          ),
+          _policyNumberField(
+            _minimumMarginController,
+            context.loc.text(
+              'أقل هامش فوق التكلفة (%)',
+              'Minimum markup over cost (%)',
+            ),
+            1000,
+            'storeMinimumMarginPercent',
+          ),
+          _permissionTile(
+            context.loc.text(
+              'السماح بخصم على الفاتورة',
+              'Allow invoice discounts',
+            ),
+            'canApplyStoreDiscount',
+          ),
+          _policyNumberField(
+            _maxDiscountController,
+            context.loc.text(
+              'أقصى خصم من إجمالي الأصناف (%)',
+              'Maximum discount from subtotal (%)',
+            ),
+            100,
+            'storeMaxDiscountPercent',
+          ),
+          _policyNumberField(
+            _maxLossController,
+            context.loc.text(
+              'أقصى خسارة مسموحة من التكلفة (%)',
+              'Maximum allowed loss against cost (%)',
+            ),
+            100,
+            'storeMaxInvoiceLossPercent',
+          ),
         ],
       ),
     );
@@ -825,7 +911,7 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
   }
 
   Widget _permissionTile(String title, String key) {
-    final enabled = _permissions[key] ?? false;
+    final enabled = _permissions[key] == true;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -860,6 +946,27 @@ class _SubUsersScreenState extends State<SubUsersScreen> {
       ),
     );
   }
+
+  Widget _policyNumberField(
+    TextEditingController controller,
+    String label,
+    double max,
+    String key,
+  ) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: TextField(
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      inputFormatters: [
+        FilteringTextInputFormatter.allow(RegExp(r'^\d{0,4}(\.\d{0,2})?$')),
+      ],
+      decoration: InputDecoration(labelText: label, suffixText: '%'),
+      onChanged: (value) {
+        final parsed = double.tryParse(value) ?? 0;
+        _permissions[key] = parsed.clamp(0, max).toDouble();
+      },
+    ),
+  );
 
   String _permissionHint(String key) {
     final fromCatalog = PermissionCatalog.description(context, key).trim();
