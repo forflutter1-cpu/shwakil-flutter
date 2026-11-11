@@ -1060,11 +1060,16 @@ class _AdminCardPrintRequestsScreenState
         (request['chargedIssueCostAmount'] as num?)?.toDouble() ?? 0;
     final deferredIssueCostAmount =
         (request['deferredIssueCostAmount'] as num?)?.toDouble() ?? 0;
+    final waivedIssueCostAmount =
+        (request['waivedIssueCostAmount'] as num?)?.toDouble() ?? 0;
     final printCount = (request['printCount'] as num?)?.toInt() ?? 0;
     final totalAmount = CurrencyFormatter.ils(
       (request['totalAmount'] as num?)?.toDouble() ?? 0,
     );
-    final hasFees = chargedIssueCostAmount > 0 || deferredIssueCostAmount > 0;
+    final hasFees =
+        chargedIssueCostAmount > 0 ||
+        deferredIssueCostAmount > 0 ||
+        waivedIssueCostAmount > 0;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: ShwakelCard(
@@ -1179,6 +1184,11 @@ class _AdminCardPrintRequestsScreenState
                   _metaItem(
                     l.tr('screens_admin_card_print_requests_screen.050'),
                     CurrencyFormatter.ils(deferredIssueCostAmount),
+                  ),
+                if (waivedIssueCostAmount > 0)
+                  _metaItem(
+                    'رسم إصدار قديم تمت تسويته',
+                    CurrencyFormatter.ils(waivedIssueCostAmount),
                   ),
                 if (((request['feeAmount'] as num?)?.toDouble() ?? 0) > 0)
                   _metaItem(

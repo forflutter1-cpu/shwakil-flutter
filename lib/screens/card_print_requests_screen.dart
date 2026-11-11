@@ -399,12 +399,8 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
               isPrivate: isPrivateRequest,
               cardValue: value,
             );
-            final chargedIssueCostAmount = !isBalanceCard || isPrivateRequest
-                ? issueCostPerCard * quantity
-                : 0.0;
-            final deferredIssueCostAmount = isBalanceCard && !isPrivateRequest
-                ? issueCostPerCard * quantity
-                : 0.0;
+            final chargedIssueCostAmount = issueCostPerCard * quantity;
+            const deferredIssueCostAmount = 0.0;
             final baseAmount = faceAmount + chargedIssueCostAmount;
             final feeAmount = _cardRequestFeeAmount(baseAmount, feePercent);
             final totalAmount = baseAmount + feeAmount;
@@ -2043,7 +2039,12 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
         (request['chargedIssueCostAmount'] as num?)?.toDouble() ?? 0;
     final deferredIssueCostAmount =
         (request['deferredIssueCostAmount'] as num?)?.toDouble() ?? 0;
-    final hasFees = chargedIssueCostAmount > 0 || deferredIssueCostAmount > 0;
+    final waivedIssueCostAmount =
+        (request['waivedIssueCostAmount'] as num?)?.toDouble() ?? 0;
+    final hasFees =
+        chargedIssueCostAmount > 0 ||
+        deferredIssueCostAmount > 0 ||
+        waivedIssueCostAmount > 0;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
@@ -2147,6 +2148,8 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
         (request['chargedIssueCostAmount'] as num?)?.toDouble() ?? 0;
     final deferredIssueCostAmount =
         (request['deferredIssueCostAmount'] as num?)?.toDouble() ?? 0;
+    final waivedIssueCostAmount =
+        (request['waivedIssueCostAmount'] as num?)?.toDouble() ?? 0;
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         fullscreenDialog: true,
@@ -2221,6 +2224,11 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
                               l.tr('screens_card_print_requests_screen.074'),
                               CurrencyFormatter.ils(deferredIssueCostAmount),
                             ),
+                          if (waivedIssueCostAmount > 0)
+                            _metaItem(
+                              'رسم إصدار قديم تمت تسويته',
+                              CurrencyFormatter.ils(waivedIssueCostAmount),
+                            ),
                           if (((request['feeAmount'] as num?)?.toDouble() ??
                                   0) >
                               0)
@@ -2285,7 +2293,8 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
                           ),
                         ),
                       if (chargedIssueCostAmount > 0 ||
-                          deferredIssueCostAmount > 0)
+                          deferredIssueCostAmount > 0 ||
+                          waivedIssueCostAmount > 0)
                         Padding(
                           padding: const EdgeInsets.only(top: 16),
                           child: Container(
@@ -2297,7 +2306,9 @@ class _CardPrintRequestsScreenState extends State<CardPrintRequestsScreen> {
                               border: Border.all(color: AppTheme.borderLight),
                             ),
                             child: Text(
-                              deferredIssueCostAmount > 0
+                              waivedIssueCostAmount > 0
+                                  ? 'تمت تسوية رسم الإصدار القديم بقيمة ${CurrencyFormatter.ils(waivedIssueCostAmount)}، ولا يؤثر على رصيد البطاقة.'
+                                  : deferredIssueCostAmount > 0
                                   ? l.tr(
                                       'screens_card_print_requests_screen.101',
                                     )

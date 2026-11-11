@@ -3623,11 +3623,11 @@ class _AdminSystemSettingsScreenState extends State<AdminSystemSettingsScreen> {
                 ),
                 _buildFeeField('رسوم السحب', _withdrawFeeController),
                 _buildFeeField(
-                  'رسوم بطاقة رصيد عند الاستخدام',
+                  'رسوم إصدار بطاقة الرصيد (على مُصدر البطاقة)',
                   _standardCardIssueCostController,
                 ),
                 _buildFeeField(
-                  'رسوم بطاقة توصيل عند الاستخدام',
+                  'رسوم إصدار بطاقة التوصيل (على مُصدر البطاقة)',
                   _deliveryCardIssueCostController,
                 ),
                 _buildFeeField(
